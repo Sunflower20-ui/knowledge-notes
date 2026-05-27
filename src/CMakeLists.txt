@@ -2,6 +2,10 @@
     main.cpp
     app/main_window.h
     app/main_window.cpp
+    core/database.h
+    core/database.cpp
+    core/note_repository.h
+    core/note_repository.cpp
 )
 
 add_executable(knowledge_notes ${SOURCES})
