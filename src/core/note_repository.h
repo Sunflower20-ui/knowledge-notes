@@ -6,6 +6,8 @@
 #include <QStringList>
 #include <QVector>
 
+#include "search_result.h"
+
 class Database;
 
 // ---- Data structures ----
@@ -68,6 +70,9 @@ public:
     /// Search notes by title or content plain-text (LIKE).
     QVector<NoteData> searchNotes(const QString &keyword, int limit = 50) const;
 
+    /// Full-text search via FTS5 with BM25 ranking and <mark> highlighted snippets.
+    QVector<SearchResult> searchFts(const QString &keyword, int limit = 20) const;
+
     // --- Tags ---
 
     qint64  createTag(const QString &name);
@@ -102,5 +107,8 @@ signals:
     void noteDeleted(qint64 id);
 
 private:
+    void indexFts(qint64 noteId, const QString &title, const QString &plainText);
+    void deindexFts(qint64 noteId);
+
     Database &m_db;
 };

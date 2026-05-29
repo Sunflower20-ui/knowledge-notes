@@ -1,5 +1,4 @@
 ﻿#include <QApplication>
-#include <QStandardPaths>
 #include <QDir>
 #include <QDebug>
 #include "app/main_window.h"
@@ -13,17 +12,17 @@ int main(int argc, char *argv[])
     app.setApplicationVersion("0.1.0");
     app.setOrganizationName("KnowledgeNotes");
 
-    // --- Day 2: Initialize SQLite database ---
-    const QString dataDir = QStandardPaths::writableLocation(
-        QStandardPaths::AppDataLocation);
-    QDir().mkpath(dataDir);
-    const QString dbPath = dataDir + QStringLiteral("/knowledge_notes.db");
+    // --- Day 2: Initialize SQLite database in project root ---
+    const QString dbPath = QStringLiteral(PROJECT_ROOT "/data/knowledge_notes.db");
+    QDir().mkpath(QStringLiteral(PROJECT_ROOT "/data"));
 
     Database database;
     if (!database.open(dbPath)) {
         qCritical() << "Failed to open database at" << dbPath;
         return 1;
     }
+
+    qInfo() << "Database location:" << dbPath;
 
     NoteRepository repo(database);
 

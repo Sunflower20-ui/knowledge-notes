@@ -1,4 +1,4 @@
-﻿#include "database.h"
+#include "database.h"
 
 #include <QDebug>
 #include <QDir>
@@ -65,6 +65,7 @@ void Database::close()
     if (m_db.isOpen()) {
         const QString connName = m_db.connectionName();
         m_db.close();
+        m_db = QSqlDatabase();           // reset copy before removing
         QSqlDatabase::removeDatabase(connName);
     }
     m_path.clear();
@@ -89,6 +90,11 @@ const QSqlDatabase &Database::handle() const
 QString Database::path() const
 {
     return m_path;
+}
+
+int Database::schemaVersion() const
+{
+    return m_schemaVersion;
 }
 
 bool Database::createSchema()
@@ -180,14 +186,36 @@ bool Database::runMigrations()
             m_schemaVersion = q.value(0).toInt();
     }
 
-    // Future migrations go here. Example:
-    //
-    // if (m_schemaVersion < 2) {
-    //     QSqlQuery q(m_db);
-    //     q.exec("ALTER TABLE notes ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0");
-    //     q.exec("INSERT INTO schema_version(version) VALUES(2)");
-    //     m_schemaVersion = 2;
-    // }
+    // ---- Migration v1 → v2: add FTS5 full-text search ----
+    if (m_schemaVersion < 2) {
+        QSqlQuery q(m_db);
+
+        // Create the FTS5 virtual table (independent mode — no content-sync).
+        // unicode61 tokenizer handles Chinese/Unicode; prefix='2' enables
+        // prefix queries for auto-complete.
+        if (!q.exec(QStringLiteral(
+                "CREATE VIRTUAL TABLE IF NOT EXISTS notes_fts USING fts5("
+                "  title, content,"
+                "  tokenize='unicode61',"
+                "  prefix='2'"
+                ")"))) {
+            qWarning() << "Migration v2: create notes_fts" << q.lastError().text();
+            return false;
+        }
+
+        // Seed existing notes into the FTS index
+        if (!q.exec(QStringLiteral(
+                "INSERT INTO notes_fts(rowid, title, content) "
+                "SELECT id, title, plain_text FROM notes WHERE is_deleted = 0"))) {
+            qWarning() << "Migration v2: seed FTS" << q.lastError().text();
+            return false;
+        }
+
+        q.exec(QStringLiteral("INSERT INTO schema_version(version) VALUES(2)"));
+        m_schemaVersion = 2;
+
+        qInfo() << "Migrated to schema v2: FTS5 index created";
+    }
 
     // Seed version row if empty
     if (m_schemaVersion == 0) {
@@ -197,5 +225,26 @@ bool Database::runMigrations()
     }
 
     qInfo() << "Database schema version:" << m_schemaVersion;
+    return true;
+}
+
+bool Database::rebuildFtsIndex()
+{
+    QSqlQuery q(m_db);
+
+    // Clear and rebuild from scratch
+    if (!q.exec(QStringLiteral("DELETE FROM notes_fts"))) {
+        qWarning() << "rebuildFtsIndex: delete" << q.lastError().text();
+        return false;
+    }
+
+    if (!q.exec(QStringLiteral(
+            "INSERT INTO notes_fts(rowid, title, content) "
+            "SELECT id, title, plain_text FROM notes WHERE is_deleted = 0"))) {
+        qWarning() << "rebuildFtsIndex: insert" << q.lastError().text();
+        return false;
+    }
+
+    qInfo() << "FTS index rebuilt";
     return true;
 }

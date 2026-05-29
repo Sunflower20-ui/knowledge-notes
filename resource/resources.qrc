@@ -1,0 +1,16 @@
+﻿<RCC>
+    <qresource prefix="/">
+        <file>style.qss</file>
+        <file>icons/app_icon.svg</file>
+        <file>icons/new_note.svg</file>
+        <file>icons/folder.svg</file>
+        <file>icons/tag.svg</file>
+        <file>icons/search.svg</file>
+        <file>icons/link.svg</file>
+        <file>icons/backlinks.svg</file>
+        <file>icons/outline.svg</file>
+        <file>icons/edit.svg</file>
+        <file>icons/preview.svg</file>
+        <file>icons/settings.svg</file>
+    </qresource>
+</RCC>

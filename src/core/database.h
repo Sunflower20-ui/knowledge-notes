@@ -34,6 +34,12 @@ public:
     /// Current database file path.
     QString path() const;
 
+    /// Schema version after migrations.
+    int schemaVersion() const;
+
+    /// Rebuild the entire FTS index from scratch.
+    bool rebuildFtsIndex();
+
 private:
     bool createSchema();
     bool runMigrations();

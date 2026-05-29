@@ -1,4 +1,4 @@
-﻿# Build
+# Build
 build/
 out/
 *.o
@@ -37,3 +37,13 @@ vcpkg_installed/
 
 # Test output
 Testing/
+
+# Build (additional)
+build_clean/
+build_output.txt
+
+# Runtime data
+data/
+
+# Qt Creator user settings
+CMakeLists.txt.user

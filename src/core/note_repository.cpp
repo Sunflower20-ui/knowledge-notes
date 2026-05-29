@@ -1,14 +1,47 @@
-﻿#include "note_repository.h"
+#include "note_repository.h"
 #include "database.h"
 
 #include <QSqlDatabase>
 #include <QSqlError>
 #include <QSqlQuery>
 #include <QDebug>
+#include <QRegularExpression>
 
 NoteRepository::NoteRepository(Database &db, QObject *parent)
     : QObject(parent), m_db(db)
 {
+}
+
+// ============================================================================
+// FTS helpers
+// ============================================================================
+
+void NoteRepository::indexFts(qint64 noteId, const QString &title,
+                               const QString &plainText)
+{
+    QSqlQuery q(m_db.handle());
+
+    // Upsert: delete old entry (if any), then insert
+    q.prepare(QStringLiteral("DELETE FROM notes_fts WHERE rowid = :id"));
+    q.bindValue(QStringLiteral(":id"), noteId);
+    q.exec();
+
+    q.prepare(QStringLiteral(
+        "INSERT INTO notes_fts(rowid, title, content) VALUES(:id, :title, :content)"));
+    q.bindValue(QStringLiteral(":id"), noteId);
+    q.bindValue(QStringLiteral(":title"), title);
+    q.bindValue(QStringLiteral(":content"), plainText);
+
+    if (!q.exec())
+        qWarning() << "indexFts:" << q.lastError().text();
+}
+
+void NoteRepository::deindexFts(qint64 noteId)
+{
+    QSqlQuery q(m_db.handle());
+    q.prepare(QStringLiteral("DELETE FROM notes_fts WHERE rowid = :id"));
+    q.bindValue(QStringLiteral(":id"), noteId);
+    q.exec();
 }
 
 // ============================================================================
@@ -32,6 +65,10 @@ qint64 NoteRepository::createNote(const QString &title, const QString &content)
     }
 
     const qint64 id = q.lastInsertId().toLongLong();
+
+    // Index into FTS5
+    indexFts(id, title, content);
+
     emit noteCreated(id);
     return id;
 }
@@ -55,6 +92,8 @@ bool NoteRepository::updateNote(qint64 id, const QString &title,
     }
 
     if (q.numRowsAffected() > 0) {
+        // Refresh FTS index
+        indexFts(id, title, content);
         emit noteUpdated(id);
         return true;
     }
@@ -75,6 +114,8 @@ bool NoteRepository::deleteNote(qint64 id)
     }
 
     if (q.numRowsAffected() > 0) {
+        // Remove from FTS index
+        deindexFts(id);
         emit noteDeleted(id);
         return true;
     }
@@ -91,7 +132,12 @@ bool NoteRepository::purgeNote(qint64 id)
         qWarning() << "purgeNote:" << q.lastError().text();
         return false;
     }
-    return q.numRowsAffected() > 0;
+
+    if (q.numRowsAffected() > 0) {
+        deindexFts(id);
+        return true;
+    }
+    return false;
 }
 
 bool NoteRepository::restoreNote(qint64 id)
@@ -106,7 +152,15 @@ bool NoteRepository::restoreNote(qint64 id)
         qWarning() << "restoreNote:" << q.lastError().text();
         return false;
     }
-    return q.numRowsAffected() > 0;
+
+    if (q.numRowsAffected() > 0) {
+        // Re-index into FTS
+        NoteData note = getNote(id);
+        if (note.id == id)
+            indexFts(id, note.title, note.plainText);
+        return true;
+    }
+    return false;
 }
 
 NoteData NoteRepository::getNote(qint64 id) const
@@ -168,11 +222,11 @@ QVector<NoteData> NoteRepository::searchNotes(const QString &keyword,
     q.prepare(QStringLiteral(
         "SELECT id, title, content, plain_text, created_at, updated_at, is_deleted "
         "FROM notes "
-        "WHERE is_deleted = 0 AND (title LIKE :kw OR plain_text LIKE :kw2) "
+        "WHERE is_deleted = 0 "
+        "  AND (title LIKE :kw OR plain_text LIKE :kw2) "
         "ORDER BY updated_at DESC LIMIT :limit"));
-    const QString pattern = QStringLiteral("%%1%").arg(keyword);
-    q.bindValue(QStringLiteral(":kw"), pattern);
-    q.bindValue(QStringLiteral(":kw2"), pattern);
+    q.bindValue(QStringLiteral(":kw"), QStringLiteral("%%1%").arg(keyword));
+    q.bindValue(QStringLiteral(":kw2"), QStringLiteral("%%1%").arg(keyword));
     q.bindValue(QStringLiteral(":limit"), limit);
 
     QVector<NoteData> result;
@@ -196,6 +250,90 @@ QVector<NoteData> NoteRepository::searchNotes(const QString &keyword,
 }
 
 // ============================================================================
+// Full-text search (FTS5 + BM25)
+// ============================================================================
+
+QVector<SearchResult> NoteRepository::searchFts(const QString &keyword,
+                                                  int limit) const
+{
+    QVector<SearchResult> results;
+
+    if (keyword.trimmed().isEmpty())
+        return results;
+
+    // Sanitize the query: escape FTS5 special characters and wrap in quotes for
+    // phrase matching. A simple query like "hello world" becomes "\"hello\" \"world\""
+    // so each token is searched independently.
+    QString sanitized;
+    const QString trimmed = keyword.trimmed();
+    const QStringList tokens = trimmed.split(QRegularExpression(QStringLiteral("\\s+")),
+                                              Qt::SkipEmptyParts);
+    for (const QString &token : tokens) {
+        // Escape double-quotes within the token, then quote it
+        QString escaped = token;
+        escaped.replace(QStringLiteral("\""), QStringLiteral("\"\""));
+        if (!sanitized.isEmpty())
+            sanitized.append(QStringLiteral(" "));
+        sanitized.append(QStringLiteral("\"%1\"").arg(escaped));
+    }
+
+    QSqlQuery q(m_db.handle());
+    q.prepare(QStringLiteral(
+        "SELECT n.id, n.title,"
+        "  highlight(notes_fts, 0, '<mark>', '</mark>') AS hl_title,"
+        "  highlight(notes_fts, 1, '<mark>', '</mark>') AS hl_content,"
+        "  bm25(notes_fts) AS score"
+        " FROM notes_fts"
+        " JOIN notes n ON n.id = notes_fts.rowid"
+        " WHERE notes_fts MATCH :query"
+        "   AND n.is_deleted = 0"
+        " ORDER BY score"
+        " LIMIT :limit"));
+    q.bindValue(QStringLiteral(":query"), sanitized);
+    q.bindValue(QStringLiteral(":limit"), limit);
+
+    if (!q.exec()) {
+        qWarning() << "searchFts:" << q.lastError().text();
+        return results;
+    }
+
+    while (q.next()) {
+        SearchResult sr;
+        sr.noteId  = q.value(0).toLongLong();
+        sr.title   = q.value(1).toString();
+
+        // Prefer a hit in the title; otherwise use a content snippet.
+        QString hlTitle   = q.value(2).toString();
+        QString hlContent = q.value(3).toString();
+
+        if (hlTitle.contains(QStringLiteral("<mark>"))) {
+            sr.snippet = hlTitle;
+        } else if (!hlContent.isEmpty()) {
+            // Extract a window around the first highlight
+            sr.snippet = hlContent;
+            // Trim very long snippets for display
+            if (sr.snippet.length() > 300) {
+                int firstMark = sr.snippet.indexOf(QStringLiteral("<mark>"));
+                int start = qMax(0, firstMark - 80);
+                if (start > 0)
+                    sr.snippet = QStringLiteral("…") + sr.snippet.mid(start);
+                if (sr.snippet.length() > 300)
+                    sr.snippet = sr.snippet.left(300) + QStringLiteral("…");
+            }
+        } else {
+            // No highlight in either column — just show first line of content
+            NoteData note = getNote(sr.noteId);
+            sr.snippet = note.plainText.left(200);
+        }
+
+        sr.bm25 = q.value(4).toDouble();
+        results.append(sr);
+    }
+
+    return results;
+}
+
+// ============================================================================
 // Tags
 // ============================================================================
 
@@ -203,18 +341,18 @@ qint64 NoteRepository::createTag(const QString &name)
 {
     QSqlQuery q(m_db.handle());
     q.prepare(QStringLiteral("INSERT OR IGNORE INTO tags(name) VALUES(:name)"));
-    q.bindValue(QStringLiteral(":name"), name);
+    q.bindValue(QStringLiteral(":name"), name.trimmed());
 
     if (!q.exec()) {
         qWarning() << "createTag:" << q.lastError().text();
         return -1;
     }
 
-    if (q.numRowsAffected() == 0) {
-        // Already existed — look up the existing id
-        return getTagByName(name).id;
-    }
-    return q.lastInsertId().toLongLong();
+    // Return the ID (new or existing)
+    if (q.lastInsertId().toLongLong() > 0)
+        return q.lastInsertId().toLongLong();
+
+    return getTagByName(name).id;
 }
 
 TagData NoteRepository::getTag(qint64 id) const
@@ -225,6 +363,7 @@ TagData NoteRepository::getTag(qint64 id) const
 
     if (!q.exec() || !q.next())
         return {};
+
     return { q.value(0).toLongLong(), q.value(1).toString() };
 }
 
@@ -232,10 +371,11 @@ TagData NoteRepository::getTagByName(const QString &name) const
 {
     QSqlQuery q(m_db.handle());
     q.prepare(QStringLiteral("SELECT id, name FROM tags WHERE name = :name"));
-    q.bindValue(QStringLiteral(":name"), name);
+    q.bindValue(QStringLiteral(":name"), name.trimmed());
 
     if (!q.exec() || !q.next())
         return {};
+
     return { q.value(0).toLongLong(), q.value(1).toString() };
 }
 
