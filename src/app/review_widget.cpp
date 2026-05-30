@@ -1,4 +1,4 @@
-﻿#include "review_widget.h"
+#include "review_widget.h"
 #include "core/flashcard.h"
 
 #include <QLabel>
@@ -6,6 +6,7 @@
 #include <QProgressBar>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
+#include <QGridLayout>
 #include <QFont>
 
 ReviewWidget::ReviewWidget(FlashcardRepository *repo, QWidget *parent)
@@ -39,7 +40,7 @@ ReviewWidget::ReviewWidget(FlashcardRepository *repo, QWidget *parent)
     layout->addStretch();
 
     // Front (question)
-    m_frontLabel = new QLabel(QStringLiteral("准备好开始复习了吗？"));
+    m_frontLabel = new QLabel(QString::fromUtf8("\xe7\x82\xb9\xe5\x87\xbb\xe5\xb7\xa5\xe5\x85\xb7\xe6\xa0\x8f\xe3\x80\x8c\xe5\xa4\x8d\xe4\xb9\xa0\xe3\x80\x8d\xe5\xbc\x80\xe5\xa7\x8b"));
     m_frontLabel->setAlignment(Qt::AlignCenter);
     m_frontLabel->setWordWrap(true);
     m_frontLabel->setStyleSheet(QStringLiteral(
@@ -54,16 +55,17 @@ ReviewWidget::ReviewWidget(FlashcardRepository *repo, QWidget *parent)
     layout->addWidget(m_stateLabel);
 
     // Show Answer button
-    m_showBtn = new QPushButton(tr("显示答案"));
+    m_showBtn = new QPushButton(tr("\xe6\x98\xbe\xe7\xa4\xba\xe7\xad\x94\xe6\xa1\x88"));
     m_showBtn->setStyleSheet(QStringLiteral(
         "QPushButton { background: #45475a; color: #cdd6f4; border: none; "
         "border-radius: 8px; padding: 12px 32px; font-size: 15px; }"
         "QPushButton:hover { background: #585b70; }"
     ));
     connect(m_showBtn, &QPushButton::clicked, this, &ReviewWidget::showAnswer);
+    m_showBtn->hide();
     layout->addWidget(m_showBtn, 0, Qt::AlignCenter);
 
-    // Back (answer) — hidden until revealed
+    // Back (answer)
     m_backLabel = new QLabel;
     m_backLabel->setAlignment(Qt::AlignCenter);
     m_backLabel->setWordWrap(true);
@@ -76,39 +78,51 @@ ReviewWidget::ReviewWidget(FlashcardRepository *repo, QWidget *parent)
 
     layout->addStretch();
 
-    // Rating buttons (0–5)
-    auto *rateLayout = new QHBoxLayout;
-    rateLayout->setSpacing(8);
+    // Rating buttons (2x3 grid)
+    auto *rateGrid = new QGridLayout;
+    rateGrid->setSpacing(6);
 
-    const char *labels[]  = {"完全忘了", "似曾相识", "看过才知", "勉强想起", "稍有犹豫", "轻松答对"};
+    const char *labels[]  = {
+        "\xe5\xae\x8c\xe5\x85\xa8\xe5\xbf\x98\xe4\xba\x86",
+        "\xe4\xbc\xbc\xe6\x9b\xbe\xe7\x9b\xb8\xe8\xaf\x86",
+        "\xe7\x9c\x8b\xe8\xbf\x87\xe6\x89\x8d\xe7\x9f\xa5",
+        "\xe5\x8b\x89\xe5\xbc\xba\xe6\x83\xb3\xe8\xb5\xb7",
+        "\xe7\xa8\x8d\xe6\x9c\x89\xe7\x8a\xb9\xe8\xb1\xab",
+        "\xe8\xbd\xbb\xe6\x9d\xbe\xe7\xad\x94\xe5\xaf\xb9"
+    };
     const char *colors[]  = {"#f38ba8", "#fab387", "#f9e2af", "#a6e3a1", "#89b4fa", "#cba6f7"};
 
     for (int i = 0; i < 6; i++) {
         m_rateBtns[i] = new QPushButton(QStringLiteral("%1\n%2").arg(i).arg(labels[i]));
         m_rateBtns[i]->setStyleSheet(QStringLiteral(
             "QPushButton { background: %1; color: #1e1e2e; border: none; "
-            "border-radius: 8px; padding: 10px 6px; font-size: 12px; font-weight: 600; "
-            "min-width: 80px; }"
+            "border-radius: 6px; padding: 6px 4px; font-size: 11px; font-weight: 600; }"
             "QPushButton:hover { opacity: 0.85; }"
         ).arg(colors[i]));
+        m_rateBtns[i]->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
         m_rateBtns[i]->hide();
         int q = i;
         connect(m_rateBtns[i], &QPushButton::clicked, this, [this, q] { rateCard(q); });
-        rateLayout->addWidget(m_rateBtns[i]);
+        rateGrid->addWidget(m_rateBtns[i], i / 3, i % 3);
     }
-    layout->addLayout(rateLayout);
+    layout->addLayout(rateGrid);
 }
 
 void ReviewWidget::startSession()
 {
+    m_backLabel->hide();
+    m_showBtn->show();
+    for (int i = 0; i < 6; i++) m_rateBtns[i]->hide();
+    m_stateLabel->clear();
+
     auto cards = m_repo->dueCards();
     m_cardIds.clear();
     for (const auto &c : cards) m_cardIds.append(c.id);
 
     if (m_cardIds.isEmpty()) {
-        m_frontLabel->setText(tr("🎉 没有待复习的卡片！"));
+        m_frontLabel->setText(tr("\xe6\xb2\xa1\xe6\x9c\x89\xe5\xbe\x85\xe5\xa4\x8d\xe4\xb9\xa0\xe7\x9a\x84\xe5\x8d\xa1\xe7\x89\x87"));
         m_showBtn->hide();
-        m_countLabel->setText(tr("0 张卡片"));
+        m_countLabel->setText(tr("0 \xe5\xbc\xa0\xe5\x8d\xa1\xe7\x89\x87"));
         m_progress->setMaximum(1);
         m_progress->setValue(1);
         return;
@@ -127,32 +141,39 @@ int ReviewWidget::dueCount() const
 void ReviewWidget::showCard(int index)
 {
     if (index < 0 || index >= m_cardIds.size()) {
+        m_frontLabel->setText(tr("\xe5\xa4\x8d\xe4\xb9\xa0\xe5\xae\x8c\xe6\x88\x90\xef\xbc\x81"));
+        m_backLabel->hide();
+        m_showBtn->hide();
+        for (int i = 0; i < 6; i++) m_rateBtns[i]->hide();
+        m_stateLabel->clear();
+        m_countLabel->setText(tr("%1 \xe5\xbc\xa0\xe5\x8d\xa1\xe7\x89\x87").arg(m_cardIds.size()));
+        m_progress->setValue(m_progress->maximum());
         emit finished();
         return;
     }
 
     m_currentIndex = index;
     FlashcardData card = m_repo->getCard(m_cardIds[index]);
+    if (card.id < 0) {
+        showCard(index + 1);
+        return;
+    }
     m_currentCardId = card.id;
     m_currentFront  = card.front;
     m_currentBack   = card.back;
 
-    // Show front
     m_frontLabel->setText(m_currentFront);
     m_backLabel->hide();
     m_showBtn->show();
 
-    // Hide rating buttons
     for (int i = 0; i < 6; i++) m_rateBtns[i]->hide();
 
-    // State info
     m_stateLabel->setText(
-        QStringLiteral("EF: %1  |  间隔: %2 天  |  复习: %3 次")
+        QStringLiteral("EF: %1  |  \xe9\x97\xb4\xe9\x9a\x94: %2 \xe5\xa4\xa9  |  \xe5\xa4\x8d\xe4\xb9\xa0: %3 \xe6\xac\xa1")
             .arg(card.ef, 0, 'f', 2)
             .arg(card.interval)
             .arg(card.n));
 
-    // Progress
     m_progress->setValue(index);
     m_countLabel->setText(
         QStringLiteral("%1 / %2").arg(index + 1).arg(m_cardIds.size()));
@@ -160,11 +181,11 @@ void ReviewWidget::showCard(int index)
 
 void ReviewWidget::showAnswer()
 {
+    if (m_currentCardId < 0) return;
     m_backLabel->setText(m_currentBack);
     m_backLabel->show();
     m_showBtn->hide();
 
-    // Show rating buttons
     for (int i = 0; i < 6; i++) m_rateBtns[i]->show();
 }
 

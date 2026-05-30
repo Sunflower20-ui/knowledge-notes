@@ -12,5 +12,7 @@
         <file>icons/edit.svg</file>
         <file>icons/preview.svg</file>
         <file>icons/settings.svg</file>
+        <file>icons/flashcard.svg</file>
+        <file>icons/review.svg</file>
     </qresource>
 </RCC>

@@ -576,7 +576,7 @@ void MainWindow::setupToolBar()
     if (m_flashcardRepo) {
         m_toolBar->addSeparator();
         m_reviewAction = m_toolBar->addAction(
-            QIcon(QStringLiteral(":/icons/search.svg")), tr("复习"));
+            QIcon(QStringLiteral(":/icons/flashcard.svg")), tr("复习"));
         m_reviewAction->setToolTip(tr("闪卡复习"));
         connect(m_reviewAction, &QAction::triggered, this, [this] {
             if (m_reviewWidget) {
@@ -874,7 +874,7 @@ void MainWindow::setupUi()
             updateReviewButton();
         });
         m_sidePanel->addTab(m_reviewWidget,
-            QIcon(QStringLiteral(":/icons/search.svg")),
+            QIcon(QStringLiteral(":/icons/flashcard.svg")),
             QStringLiteral(" 复习 "));
         updateReviewButton();
     }
