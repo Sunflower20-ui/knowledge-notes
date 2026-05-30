@@ -255,6 +255,49 @@ bool Database::runMigrations()
         qInfo() << "Migrated to schema v3: flashcards table created";
     }
 
+    
+    // ---- Migration v3 → v4: note version history ----
+    if (m_schemaVersion < 4) {
+        QSqlQuery q(m_db);
+
+        if (!q.exec(QStringLiteral(
+                "CREATE TABLE IF NOT EXISTS note_versions ("
+                "  id              INTEGER PRIMARY KEY AUTOINCREMENT,"
+                "  note_id         INTEGER NOT NULL REFERENCES notes(id) ON DELETE CASCADE,"
+                "  title           TEXT    NOT NULL DEFAULT '',"
+                "  content         TEXT    NOT NULL DEFAULT '',"
+                "  version_number  INTEGER NOT NULL DEFAULT 1,"
+                "  created_at      TEXT    NOT NULL DEFAULT (datetime('now'))"
+                ")"))) {
+            qWarning() << "Migration v4: create note_versions" << q.lastError().text();
+            return false;
+        }
+
+        q.exec(QStringLiteral(
+            "CREATE INDEX IF NOT EXISTS idx_versions_note ON note_versions(note_id, version_number)"));
+
+        q.exec(QStringLiteral("INSERT INTO schema_version(version) VALUES(4)"));
+        m_schemaVersion = 4;
+        qInfo() << "Migrated to schema v4: note_versions table created";
+    }
+
+    // ---- Migration v4 → v5: folder support ----
+    if (m_schemaVersion < 5) {
+        QSqlQuery q(m_db);
+
+        if (!q.exec(QStringLiteral(
+                "ALTER TABLE notes ADD COLUMN folder TEXT NOT NULL DEFAULT ''"))) {
+            qWarning() << "Migration v5: add folder column" << q.lastError().text();
+            return false;
+        }
+
+        q.exec(QStringLiteral(
+            "CREATE INDEX IF NOT EXISTS idx_notes_folder ON notes(folder) WHERE is_deleted = 0"));
+
+        q.exec(QStringLiteral("INSERT INTO schema_version(version) VALUES(5)"));
+        m_schemaVersion = 5;
+        qInfo() << "Migrated to schema v5: folder column added";
+    }
     qInfo() << "Database schema version:" << m_schemaVersion;
     return true;
 }

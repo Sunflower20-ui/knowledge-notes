@@ -20,6 +20,7 @@ struct NoteData {
     QDateTime createdAt;
     QDateTime updatedAt;
     bool    isDeleted = false;
+    QString  folder;
 };
 
 struct TagData {
@@ -84,6 +85,13 @@ public:
     bool removeTagFromNote(qint64 noteId, qint64 tagId);
     QVector<TagData> tagsForNote(qint64 noteId) const;
     QVector<NoteData> notesForTag(qint64 tagId) const;
+
+    // --- Folders ---
+    bool setNoteFolder(qint64 noteId, const QString &folder);
+    QStringList listFolders() const;
+    QVector<NoteData> notesForFolder(const QString &folder) const;
+    bool renameFolder(const QString &oldName, const QString &newName);
+    int deleteFolder(const QString &name);
 
     // --- Wiki links ---
 

@@ -17,6 +17,10 @@ set(SOURCES
     core/flashcard.cpp
     app/review_widget.h
     app/review_widget.cpp
+    core/version_repository.h
+    core/version_repository.cpp
+    app/version_history_widget.h
+    app/version_history_widget.cpp
 )
 
 add_executable(knowledge_notes ${SOURCES}
@@ -39,4 +43,4 @@ target_link_libraries(knowledge_notes PRIVATE
 set_target_properties(knowledge_notes PROPERTIES
     WIN32_EXECUTABLE TRUE
     MACOSX_BUNDLE TRUE
-)
+)

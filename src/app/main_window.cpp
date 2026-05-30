@@ -5,6 +5,8 @@
 #include "core/note_repository.h"
 #include "core/flashcard.h"
 #include "review_widget.h"
+#include "core/version_repository.h"
+#include "version_history_widget.h"
 
 #include <QSplitter>
 #include <QTreeView>
@@ -40,8 +42,8 @@
 // Construction
 // ============================================================================
 
-MainWindow::MainWindow(NoteRepository *repo, FlashcardRepository *fcRepo, QWidget *parent)
-    : QMainWindow(parent), m_repo(repo), m_flashcardRepo(fcRepo)
+MainWindow::MainWindow(NoteRepository *repo, FlashcardRepository *fcRepo, VersionRepository *verRepo, QWidget *parent)
+    : QMainWindow(parent), m_repo(repo), m_flashcardRepo(fcRepo), m_versionRepo(verRepo)
 {
     applyTheme();
     setupUi();
@@ -91,10 +93,12 @@ void MainWindow::loadNoteIntoEditor(qint64 noteId)
     m_saving = true;
     m_editor->setPlainText(note.content);
     m_saving = false;
+    m_editorDirty = false;
 
     m_previewDirty = true;
     updatePreview();
     refreshBacklinks();
+    updateVersionHistory(noteId);
 
     statusBar()->showMessage(
         QStringLiteral("笔记 #%1 — %2").arg(noteId).arg(note.title));
@@ -117,6 +121,9 @@ void MainWindow::saveCurrentNote()
     if (title.isEmpty()) title = QStringLiteral("未命名");
 
     m_repo->updateNote(m_currentNoteId, title, content);
+    if (m_versionRepo && m_editorDirty)
+        m_versionRepo->saveVersion(m_currentNoteId, title, content);
+    m_editorDirty = false;
 
     // Parse and sync [[wiki links]]
     syncWikiLinks(m_currentNoteId, content);
@@ -368,6 +375,7 @@ void MainWindow::setupShortcuts()
     connect(previewShortcut, &QShortcut::activated, this, [this] {
         m_editorTabs->setCurrentIndex(m_editorTabs->currentIndex() == 0 ? 1 : 0);
     });
+    updateReviewButton();
 }
 
 // ============================================================================
@@ -421,6 +429,7 @@ void MainWindow::toggleFormatting(const QString &marker)
 void MainWindow::onEditorTextChanged()
 {
     if (m_saving) return;
+    m_editorDirty = true;
     if (!m_previewDirty) {
         m_previewDirty = true;
         QTimer::singleShot(300, this, &MainWindow::updatePreview);
@@ -571,6 +580,14 @@ void MainWindow::setupToolBar()
         });
     }
 
+    // Flashcard creation button
+    if (m_flashcardRepo) {
+        QAction *flashcardBtn = m_toolBar->addAction(
+            QIcon(QStringLiteral(":/icons/new_note.svg")), tr("闪卡"));
+        flashcardBtn->setToolTip(tr("从选中文本创建闪卡"));
+        connect(flashcardBtn, &QAction::triggered, this, &MainWindow::createFlashcard);
+    }
+
     m_toggleSidebarAction = m_toolBar->addAction(
         QIcon(QStringLiteral(":/icons/folder.svg")), tr("侧栏"));
     m_toggleSidebarAction->setCheckable(true);
@@ -628,7 +645,42 @@ void MainWindow::setupUi()
     m_folderTree->setContextMenuPolicy(Qt::CustomContextMenu);
     connect(m_folderTree, &QTreeView::customContextMenuRequested, this, [this](const QPoint &pos) {
         QModelIndex idx = m_folderTree->indexAt(pos);
+        QString folderName = m_treeModel->folderNameForIndex(idx);
         qint64 noteId = m_treeModel->noteIdForIndex(idx);
+
+        // Folder context menu (skip virtual folders)
+        if (!folderName.isEmpty() && folderName != QStringLiteral("(未分类)")) {
+            QMenu menu;
+            menu.addAction(tr("重命名文件夹"), this, [this, folderName] {
+                bool ok;
+                QString newName = QInputDialog::getText(this, tr("重命名文件夹"),
+                    tr("新名称:"), QLineEdit::Normal, folderName, &ok);
+                if (ok && !newName.trimmed().isEmpty() && newName.trimmed() != folderName) {
+                    m_repo->renameFolder(folderName, newName.trimmed());
+                    m_treeModel->refresh();
+                }
+            });
+            menu.addSeparator();
+            QAction *delFolderAct = menu.addAction(tr("删除文件夹"));
+            connect(delFolderAct, &QAction::triggered, this, [this, folderName] {
+                auto ret = QMessageBox::question(this, tr("删除文件夹"),
+                    tr("确定删除文件夹「%1」及其中所有笔记吗？\n此操作不可撤销。").arg(folderName),
+                    QMessageBox::Yes | QMessageBox::No);
+                if (ret == QMessageBox::Yes) {
+                    int deleted = m_repo->deleteFolder(folderName);
+                    m_treeModel->refresh();
+                    if (m_currentNoteId > 0 && m_repo->getNote(m_currentNoteId).isDeleted) {
+                        m_editor->clear();
+                        m_currentNoteId = -1;
+                        refreshBacklinks();
+                    }
+                }
+            });
+            menu.exec(m_folderTree->viewport()->mapToGlobal(pos));
+            return;
+        }
+
+        // Note context menu
         if (noteId <= 0) return;
 
         QMenu menu;
@@ -664,7 +716,28 @@ void MainWindow::setupUi()
             }
         });
 
-        // Remove tag submenu
+        // Move to folder submenu
+        QMenu *folderMenu = menu.addMenu(tr("移动到文件夹"));
+        QStringList folders = m_repo->listFolders();
+        for (const QString &f : folders) {
+            QAction *act = folderMenu->addAction(f);
+            connect(act, &QAction::triggered, this, [this, noteId, f] {
+                m_repo->setNoteFolder(noteId, f);
+                m_treeModel->refresh();
+            });
+        }
+        folderMenu->addSeparator();
+        QAction *newFolderAct = folderMenu->addAction(tr("+ 新建文件夹..."));
+        connect(newFolderAct, &QAction::triggered, this, [this, noteId] {
+            bool ok;
+            QString name = QInputDialog::getText(this, tr("新建文件夹"), tr("文件夹名:"), QLineEdit::Normal, QString(), &ok);
+            if (ok && !name.trimmed().isEmpty()) {
+                m_repo->setNoteFolder(noteId, name.trimmed());
+                m_treeModel->refresh();
+            }
+        });
+
+                // Remove tag submenu
         if (!noteTags.isEmpty()) {
             QMenu *rmMenu = menu.addMenu(tr("移除标签"));
             for (const TagData &tag : noteTags) {
@@ -798,6 +871,18 @@ void MainWindow::setupUi()
             QStringLiteral(" 复习 "));
         updateReviewButton();
     }
+    // ========== Version history tab (Day 9: note versioning) ==========
+    if (m_versionRepo) {
+        m_versionHistoryWidget = new VersionHistoryWidget(m_versionRepo);
+        connect(m_versionHistoryWidget, &VersionHistoryWidget::versionRestored, this, [this](qint64 noteId) {
+            loadNoteIntoEditor(noteId);
+            m_treeModel->refresh();
+        });
+        m_sidePanel->addTab(m_versionHistoryWidget,
+            QIcon(QStringLiteral(":/icons/edit.svg")),
+            QStringLiteral(" 历史 "));
+    }
+
 
     auto *outlinePlaceholder = new QLabel(tr("大纲 / 目录\n将在这里显示..."));
     outlinePlaceholder->setAlignment(Qt::AlignCenter);
@@ -951,11 +1036,68 @@ void MainWindow::onTreeClicked(const QModelIndex &index)
         return;
     }
 
-    // Folder click → restore normal
+    // FolderItem click — toggle expand/collapse
+    if (m_treeModel->folderNameForIndex(index).isEmpty() == false) {
+        if (m_folderTree->isExpanded(index))
+            m_folderTree->collapse(index);
+        else
+            m_folderTree->expand(index);
+        return;
+    }
+
+    // Folder click// Folder click → restore normal
     NoteTreeModel::NodeType type = m_treeModel->nodeTypeForIndex(index);
     if (type == NoteTreeModel::NoteFolder || type == NoteTreeModel::SearchFolder || type == NoteTreeModel::TagLabel) {
         saveCurrentNote();
         m_treeModel->setSearchFilter(QString());
         m_folderTree->expandAll();
     }
+}
+
+// ============================================================================
+// Version history
+// ============================================================================
+
+void MainWindow::updateVersionHistory(qint64 noteId)
+{
+    if (m_versionHistoryWidget)
+        m_versionHistoryWidget->loadNote(noteId);
+}
+
+// ============================================================================
+// Flashcard creation
+// ============================================================================
+
+void MainWindow::createFlashcard()
+{
+    if (!m_flashcardRepo || m_currentNoteId <= 0) return;
+
+    QString selected = m_editor->textCursor().selectedText().trimmed();
+    if (selected.isEmpty()) {
+        bool ok;
+        QString front = QInputDialog::getText(this,
+            QStringLiteral("新建闪卡"), QStringLiteral("正面（问题）:"),
+            QLineEdit::Normal, QString(), &ok);
+        if (!ok || front.trimmed().isEmpty()) return;
+
+        QString back = QInputDialog::getText(this,
+            QStringLiteral("新建闪卡"), QStringLiteral("背面（答案）:"),
+            QLineEdit::Normal, QString(), &ok);
+        if (!ok || back.trimmed().isEmpty()) return;
+
+        qint64 id = m_flashcardRepo->createCard(m_currentNoteId, front.trimmed(), back.trimmed());
+        if (id > 0)
+            statusBar()->showMessage(tr("闪卡已创建"), 2000);
+    } else {
+        bool ok;
+        QString back = QInputDialog::getText(this,
+            QStringLiteral("新建闪卡"), QStringLiteral("背面（答案）:"),
+            QLineEdit::Normal, QString(), &ok);
+        if (!ok || back.trimmed().isEmpty()) return;
+
+        qint64 id = m_flashcardRepo->createCard(m_currentNoteId, selected, back.trimmed());
+        if (id > 0)
+            statusBar()->showMessage(tr("闪卡已创建"), 2000);
+    }
+    updateReviewButton();
 }

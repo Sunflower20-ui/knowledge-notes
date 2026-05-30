@@ -19,6 +19,8 @@ class WikiCompleter;
 class NoteRepository;
 class FlashcardRepository;
 class ReviewWidget;
+class VersionRepository;
+class VersionHistoryWidget;
 struct NoteData;
 
 class MainWindow : public QMainWindow
@@ -26,7 +28,7 @@ class MainWindow : public QMainWindow
     Q_OBJECT
 
 public:
-    explicit MainWindow(NoteRepository *repo, FlashcardRepository *fcRepo = nullptr, QWidget *parent = nullptr);
+    explicit MainWindow(NoteRepository *repo, FlashcardRepository *fcRepo = nullptr, VersionRepository *verRepo = nullptr, QWidget *parent = nullptr);
     ~MainWindow() override = default;
 
 private slots:
@@ -46,6 +48,8 @@ private:
     void applyTheme();
     void setupTreeContextMenu();
     void updateReviewButton();
+    void updateVersionHistory(qint64 noteId);
+    void createFlashcard();
 
     void loadNoteIntoEditor(qint64 noteId);
     void saveCurrentNote();
@@ -83,6 +87,8 @@ private:
     QTabWidget *m_sidePanel = nullptr;
     QListWidget *m_backlinksList = nullptr;
     ReviewWidget *m_reviewWidget = nullptr;
+    VersionRepository *m_versionRepo = nullptr;
+    VersionHistoryWidget *m_versionHistoryWidget = nullptr;
     QAction *m_reviewAction = nullptr;
 
     QSplitter *m_mainSplitter = nullptr;
@@ -94,5 +100,6 @@ private:
     QAction *m_toggleSidebarAction = nullptr;
 
     bool m_previewDirty = false;
+    bool m_editorDirty = false;
     bool m_saving = false;
 };

@@ -1,5 +1,6 @@
 #include "note_tree_model.h"
 #include "core/note_repository.h"
+#include <QMap>
 
 NoteTreeModel::NoteTreeModel(NoteRepository *repo, QObject *parent)
     : QAbstractItemModel(parent), m_repo(repo)
@@ -37,6 +38,11 @@ void NoteTreeModel::setTagFilter(qint64 tagId)
 
 void NoteTreeModel::buildTree()
 {
+    // Clean up old tree
+    qDeleteAll(m_root->children);
+    m_root->children.clear();
+    m_root->childCount = 0;
+
     // --- Mode 1: Search ---
     if (!m_searchFilter.isEmpty()) {
         auto *folder = new TreeNode;
@@ -102,18 +108,59 @@ void NoteTreeModel::buildTree()
     noteFolder->title = QStringLiteral("所有笔记");
     noteFolder->parent = m_root;
 
-    const QVector<NoteData> notes = m_repo->listNotes(500, 0);
-    for (const NoteData &n : notes) {
-        auto *child = new TreeNode;
-        child->type  = NoteItem;
-        child->dbId  = n.id;
-        child->title = n.title.isEmpty() ? QStringLiteral("未命名") : n.title;
-        child->parent = noteFolder;
-        noteFolder->children.append(child);
-    }
-    noteFolder->childCount = noteFolder->children.size();
-    m_root->children.append(noteFolder);
+    const QVector<NoteData> allNotes = m_repo->listNotes(500, 0);
+    const QStringList folders = m_repo->listFolders();
 
+    // Group notes by folder
+    QMap<QString, QVector<NoteData>> folderMap;
+    for (const NoteData &n : allNotes)
+        folderMap[n.folder].append(n);
+
+    int totalNotes = 0;
+
+    // Folders with notes
+    for (const auto &folder : folders) {
+        const auto &notesInFolder = folderMap.value(folder);
+        auto *folderNode = new TreeNode;
+        folderNode->type  = FolderItem;
+        folderNode->title = folder;
+        folderNode->parent = noteFolder;
+        for (const NoteData &n : notesInFolder) {
+            auto *child = new TreeNode;
+            child->type  = NoteItem;
+            child->dbId  = n.id;
+            child->title = n.title.isEmpty() ? QStringLiteral("未命名") : n.title;
+            child->parent = folderNode;
+            folderNode->children.append(child);
+        }
+        folderNode->childCount = folderNode->children.size();
+        noteFolder->children.append(folderNode);
+        totalNotes += notesInFolder.size();
+    }
+
+    // Unfiled notes
+    const auto &unfiled = folderMap.value(QString());
+    if (!unfiled.isEmpty()) {
+        auto *unfiledNode = new TreeNode;
+        unfiledNode->type  = FolderItem;
+        unfiledNode->title = QStringLiteral("(未分类)");
+        unfiledNode->parent = noteFolder;
+        for (const NoteData &n : unfiled) {
+            auto *child = new TreeNode;
+            child->type  = NoteItem;
+            child->dbId  = n.id;
+            child->title = n.title.isEmpty() ? QStringLiteral("未命名") : n.title;
+            child->parent = unfiledNode;
+            unfiledNode->children.append(child);
+        }
+        unfiledNode->childCount = unfiledNode->children.size();
+        noteFolder->children.append(unfiledNode);
+        totalNotes += unfiled.size();
+    }
+
+    noteFolder->childCount = totalNotes;
+    m_root->children.append(noteFolder);
+    m_root->childCount++;
     auto *tagFolder = new TreeNode;
     tagFolder->type  = TagFolder;
     tagFolder->title = QStringLiteral("标签");
@@ -200,6 +247,14 @@ qint64 NoteTreeModel::tagIdForIndex(const QModelIndex &index) const
 {
     TreeNode *node = nodeFromIndex(index);
     return (node && node->type == TagItem) ? node->dbId : -1;
+}
+
+QString NoteTreeModel::folderNameForIndex(const QModelIndex &index) const
+{
+    TreeNode *node = nodeFromIndex(index);
+    if (node && node->type == FolderItem)
+        return node->title;
+    return {};
 }
 
 NoteTreeModel::NodeType NoteTreeModel::nodeTypeForIndex(const QModelIndex &index) const

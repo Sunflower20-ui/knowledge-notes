@@ -167,7 +167,7 @@ NoteData NoteRepository::getNote(qint64 id) const
 {
     QSqlQuery q(m_db.handle());
     q.prepare(QStringLiteral(
-        "SELECT id, title, content, plain_text, created_at, updated_at, is_deleted "
+        "SELECT id, title, content, plain_text, folder, created_at, updated_at, is_deleted "
         "FROM notes WHERE id = :id"));
     q.bindValue(QStringLiteral(":id"), id);
 
@@ -179,9 +179,10 @@ NoteData NoteRepository::getNote(qint64 id) const
     n.title     = q.value(1).toString();
     n.content   = q.value(2).toString();
     n.plainText = q.value(3).toString();
-    n.createdAt = QDateTime::fromString(q.value(4).toString(), Qt::ISODate);
-    n.updatedAt = QDateTime::fromString(q.value(5).toString(), Qt::ISODate);
-    n.isDeleted = q.value(6).toBool();
+    n.folder    = q.value(4).toString();
+    n.createdAt = QDateTime::fromString(q.value(5).toString(), Qt::ISODate);
+    n.updatedAt = QDateTime::fromString(q.value(6).toString(), Qt::ISODate);
+    n.isDeleted = q.value(7).toBool();
     return n;
 }
 
@@ -189,7 +190,7 @@ QVector<NoteData> NoteRepository::listNotes(int limit, int offset) const
 {
     QSqlQuery q(m_db.handle());
     q.prepare(QStringLiteral(
-        "SELECT id, title, content, plain_text, created_at, updated_at, is_deleted "
+        "SELECT id, title, content, plain_text, folder, created_at, updated_at, is_deleted "
         "FROM notes WHERE is_deleted = 0 ORDER BY updated_at DESC "
         "LIMIT :limit OFFSET :offset"));
     q.bindValue(QStringLiteral(":limit"), limit);
@@ -207,9 +208,10 @@ QVector<NoteData> NoteRepository::listNotes(int limit, int offset) const
         n.title     = q.value(1).toString();
         n.content   = q.value(2).toString();
         n.plainText = q.value(3).toString();
-        n.createdAt = QDateTime::fromString(q.value(4).toString(), Qt::ISODate);
-        n.updatedAt = QDateTime::fromString(q.value(5).toString(), Qt::ISODate);
-        n.isDeleted = q.value(6).toBool();
+        n.folder    = q.value(4).toString();
+        n.createdAt = QDateTime::fromString(q.value(5).toString(), Qt::ISODate);
+        n.updatedAt = QDateTime::fromString(q.value(6).toString(), Qt::ISODate);
+        n.isDeleted = q.value(7).toBool();
         result.append(n);
     }
     return result;
@@ -220,7 +222,7 @@ QVector<NoteData> NoteRepository::searchNotes(const QString &keyword,
 {
     QSqlQuery q(m_db.handle());
     q.prepare(QStringLiteral(
-        "SELECT id, title, content, plain_text, created_at, updated_at, is_deleted "
+        "SELECT id, title, content, plain_text, folder, created_at, updated_at, is_deleted "
         "FROM notes "
         "WHERE is_deleted = 0 "
         "  AND (title LIKE :kw OR plain_text LIKE :kw2) "
@@ -241,9 +243,10 @@ QVector<NoteData> NoteRepository::searchNotes(const QString &keyword,
         n.title     = q.value(1).toString();
         n.content   = q.value(2).toString();
         n.plainText = q.value(3).toString();
-        n.createdAt = QDateTime::fromString(q.value(4).toString(), Qt::ISODate);
-        n.updatedAt = QDateTime::fromString(q.value(5).toString(), Qt::ISODate);
-        n.isDeleted = q.value(6).toBool();
+        n.folder    = q.value(4).toString();
+        n.createdAt = QDateTime::fromString(q.value(5).toString(), Qt::ISODate);
+        n.updatedAt = QDateTime::fromString(q.value(6).toString(), Qt::ISODate);
+        n.isDeleted = q.value(7).toBool();
         result.append(n);
     }
     return result;
@@ -316,12 +319,12 @@ QVector<SearchResult> NoteRepository::searchFts(const QString &keyword,
                 int firstMark = sr.snippet.indexOf(QStringLiteral("<mark>"));
                 int start = qMax(0, firstMark - 80);
                 if (start > 0)
-                    sr.snippet = QStringLiteral("…") + sr.snippet.mid(start);
+                    sr.snippet = QStringLiteral("...") + sr.snippet.mid(start);
                 if (sr.snippet.length() > 300)
-                    sr.snippet = sr.snippet.left(300) + QStringLiteral("…");
+                    sr.snippet = sr.snippet.left(300) + QStringLiteral("...");
             }
         } else {
-            // No highlight in either column — just show first line of content
+            // No highlight in either column ... just show first line of content
             NoteData note = getNote(sr.noteId);
             sr.snippet = note.plainText.left(200);
         }
@@ -454,9 +457,10 @@ QVector<NoteData> NoteRepository::notesForTag(qint64 tagId) const
         n.title     = q.value(1).toString();
         n.content   = q.value(2).toString();
         n.plainText = q.value(3).toString();
-        n.createdAt = QDateTime::fromString(q.value(4).toString(), Qt::ISODate);
-        n.updatedAt = QDateTime::fromString(q.value(5).toString(), Qt::ISODate);
-        n.isDeleted = q.value(6).toBool();
+        n.folder    = q.value(4).toString();
+        n.createdAt = QDateTime::fromString(q.value(5).toString(), Qt::ISODate);
+        n.updatedAt = QDateTime::fromString(q.value(6).toString(), Qt::ISODate);
+        n.isDeleted = q.value(7).toBool();
         result.append(n);
     }
     return result;
@@ -553,4 +557,94 @@ QVector<LinkData> NoteRepository::backlinks(qint64 noteId) const
         });
     }
     return result;
+}
+
+
+// ============================================================================
+// Folders
+// ============================================================================
+
+bool NoteRepository::setNoteFolder(qint64 noteId, const QString &folder)
+{
+    QSqlQuery q(m_db.handle());
+    q.prepare(QStringLiteral(
+        "UPDATE notes SET folder = :folder, updated_at = datetime('now') "
+        "WHERE id = :nid AND is_deleted = 0"));
+    q.bindValue(QStringLiteral(":folder"), folder);
+    q.bindValue(QStringLiteral(":nid"), noteId);
+    if (!q.exec()) {
+        qWarning() << "setNoteFolder:" << q.lastError().text();
+        return false;
+    }
+    return q.numRowsAffected() > 0;
+}
+
+QStringList NoteRepository::listFolders() const
+{
+    QSqlQuery q(m_db.handle());
+    q.exec(QStringLiteral(
+        "SELECT DISTINCT folder FROM notes WHERE is_deleted = 0 AND folder != '' ORDER BY folder"));
+    QStringList result;
+    while (q.next())
+        result.append(q.value(0).toString());
+    return result;
+}
+
+QVector<NoteData> NoteRepository::notesForFolder(const QString &folder) const
+{
+    QSqlQuery q(m_db.handle());
+    q.prepare(QStringLiteral(
+        "SELECT id, title, content, plain_text, folder, created_at, updated_at, is_deleted "
+        "FROM notes WHERE folder = :folder AND is_deleted = 0 ORDER BY updated_at DESC"));
+    q.bindValue(QStringLiteral(":folder"), folder);
+
+    QVector<NoteData> result;
+    if (!q.exec()) return result;
+    while (q.next()) {
+        NoteData n;
+        n.id        = q.value(0).toLongLong();
+        n.title     = q.value(1).toString();
+        n.content   = q.value(2).toString();
+        n.plainText = q.value(3).toString();
+        n.folder    = q.value(4).toString();
+        n.createdAt = QDateTime::fromString(q.value(5).toString(), Qt::ISODate);
+        n.updatedAt = QDateTime::fromString(q.value(6).toString(), Qt::ISODate);
+        n.isDeleted = q.value(7).toBool();
+        result.append(n);
+    }
+    return result;
+}
+
+bool NoteRepository::renameFolder(const QString &oldName, const QString &newName)
+{
+    if (oldName == newName || oldName.isEmpty() || newName.isEmpty())
+        return false;
+
+    QSqlQuery q(m_db.handle());
+    q.prepare(QStringLiteral(
+        "UPDATE notes SET folder = :new, updated_at = datetime('now') "
+        "WHERE folder = :old AND is_deleted = 0"));
+    q.bindValue(QStringLiteral(":new"), newName);
+    q.bindValue(QStringLiteral(":old"), oldName);
+    if (!q.exec()) {
+        qWarning() << "renameFolder:" << q.lastError().text();
+        return false;
+    }
+    return q.numRowsAffected() > 0;
+}
+
+int NoteRepository::deleteFolder(const QString &name)
+{
+    if (name.isEmpty()) return 0;
+
+    QSqlQuery q(m_db.handle());
+    q.prepare(QStringLiteral(
+        "UPDATE notes SET is_deleted = 1, updated_at = datetime('now') "
+        "WHERE folder = :folder AND is_deleted = 0"));
+    q.bindValue(QStringLiteral(":folder"), name);
+    if (!q.exec()) {
+        qWarning() << "deleteFolder:" << q.lastError().text();
+        return -1;
+    }
+    return q.numRowsAffected();
 }

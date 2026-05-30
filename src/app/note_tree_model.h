@@ -25,7 +25,8 @@ public:
         TagFolder   = 3,
         TagItem     = 4,
         SearchFolder = 5,
-        TagLabel    = 6
+        TagLabel    = 6,
+        FolderItem  = 7
     };
 
     explicit NoteTreeModel(NoteRepository *repo, QObject *parent = nullptr);
@@ -52,6 +53,7 @@ public:
 
     qint64 noteIdForIndex(const QModelIndex &index) const;
     qint64 tagIdForIndex(const QModelIndex &index) const;
+    QString folderNameForIndex(const QModelIndex &index) const;
     NodeType nodeTypeForIndex(const QModelIndex &index) const;
 
 private:
