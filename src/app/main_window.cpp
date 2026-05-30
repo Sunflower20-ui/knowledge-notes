@@ -1,13 +1,16 @@
 #include "main_window.h"
 #include "markdown_highlighter.h"
 #include "note_tree_model.h"
+#include "wiki_completer.h"
 #include "core/note_repository.h"
 
 #include <QSplitter>
 #include <QTreeView>
 #include <QTextEdit>
+#include <QTextBrowser>
 #include <QTabWidget>
 #include <QLabel>
+#include <QListWidget>
 #include <QMenuBar>
 #include <QStatusBar>
 #include <QToolBar>
@@ -24,6 +27,11 @@
 #include <QTextDocument>
 #include <QTextCursor>
 #include <QTimer>
+#include <QRegularExpression>
+#include <QMenu>
+#include <QInputDialog>
+#include <QMessageBox>
+#include <QScrollBar>
 #include <QDebug>
 
 // ============================================================================
@@ -67,40 +75,223 @@ void MainWindow::applyTheme()
 }
 
 // ============================================================================
-// Note loading
+// Note loading / saving
 // ============================================================================
 
 void MainWindow::loadNoteIntoEditor(qint64 noteId)
 {
     if (noteId < 0) return;
 
-    // Save current note before switching
-    if (m_currentNoteId > 0) {
-        m_repo->updateNote(m_currentNoteId,
-            m_editor->document()->toPlainText().section('\n', 0, 0).trimmed(),
-            m_editor->toPlainText());
-    }
-
     NoteData note = m_repo->getNote(noteId);
     if (note.id != noteId) return;
 
     m_currentNoteId = noteId;
+    m_saving = true;
     m_editor->setPlainText(note.content);
+    m_saving = false;
+
     m_previewDirty = true;
     updatePreview();
+    refreshBacklinks();
 
     statusBar()->showMessage(
         QStringLiteral("笔记 #%1 — %2").arg(noteId).arg(note.title));
 }
 
-void MainWindow::onTreeClicked(const QModelIndex &index)
+void MainWindow::saveCurrentNote()
 {
-    if (!index.isValid()) return;
+    if (m_currentNoteId <= 0) return;
+    if (m_saving) return;
 
-    qint64 noteId = m_treeModel->noteIdForIndex(index);
-    if (noteId > 0) {
-        loadNoteIntoEditor(noteId);
+    QString content = m_editor->toPlainText();
+    // Title = first non-empty line, trimmed
+    QString title;
+    for (const QString &line : content.split('\n')) {
+        QString t = line.trimmed();
+        // Strip leading # markers
+        while (t.startsWith('#')) t = t.mid(1).trimmed();
+        if (!t.isEmpty()) { title = t; break; }
     }
+    if (title.isEmpty()) title = QStringLiteral("未命名");
+
+    m_repo->updateNote(m_currentNoteId, title, content);
+
+    // Parse and sync [[wiki links]]
+    syncWikiLinks(m_currentNoteId, content);
+
+    // Reset to normal mode so the updated note appears in the tree
+    if (!m_treeModel->currentFilter().isEmpty() || m_treeModel->currentTagFilter() > 0) {
+        m_treeModel->setSearchFilter(QString());
+    } else {
+        m_treeModel->refresh();
+    }
+}
+
+void MainWindow::syncWikiLinks(qint64 noteId, const QString &content)
+{
+    // Extract all [[...]] patterns
+    static QRegularExpression wikiRegex(QStringLiteral("\\[\\[([^\\]\\|]+)(?:\\|[^\\]]+)?\\]\\]"));
+    QVector<QPair<QString, qint64>> links;
+    QSet<QString> seen;   // deduplicate
+
+    QRegularExpressionMatchIterator it = wikiRegex.globalMatch(content);
+    while (it.hasNext()) {
+        QRegularExpressionMatch match = it.next();
+        QString targetTitle = match.captured(1).trimmed();
+        if (targetTitle.isEmpty() || seen.contains(targetTitle)) continue;
+        seen.insert(targetTitle);
+
+        // Try to resolve the title to a note ID
+        QVector<NoteData> found = m_repo->searchNotes(targetTitle, 1);
+        qint64 targetId = -1;
+        if (!found.isEmpty() && found[0].title.compare(targetTitle, Qt::CaseInsensitive) == 0)
+            targetId = found[0].id;
+
+        links.append({targetTitle, targetId});
+    }
+
+    m_repo->syncLinks(noteId, links);
+}
+
+// ============================================================================
+// Backlinks panel
+// ============================================================================
+
+void MainWindow::refreshBacklinks()
+{
+    m_backlinksList->clear();
+
+    if (m_currentNoteId <= 0) return;
+
+    QVector<LinkData> blinks = m_repo->backlinks(m_currentNoteId);
+    if (blinks.isEmpty()) {
+        auto *item = new QListWidgetItem(QStringLiteral("（暂无反向链接）"));
+        item->setFlags(Qt::NoItemFlags);
+        item->setForeground(QColor("#6c7086"));
+        m_backlinksList->addItem(item);
+        return;
+    }
+
+    for (const LinkData &link : blinks) {
+        NoteData sourceNote = m_repo->getNote(link.sourceNoteId);
+        QString display = sourceNote.title.isEmpty()
+            ? QStringLiteral("未命名 #%1").arg(link.sourceNoteId)
+            : sourceNote.title;
+        auto *item = new QListWidgetItem(
+            QIcon(QStringLiteral(":/icons/link.svg")), display);
+        item->setData(Qt::UserRole, link.sourceNoteId);
+        m_backlinksList->addItem(item);
+    }
+}
+
+void MainWindow::navigateToNoteByTitle(const QString &title)
+{
+    QVector<NoteData> found = m_repo->searchNotes(title, 1);
+    if (!found.isEmpty() && found[0].title.compare(title, Qt::CaseInsensitive) == 0) {
+        loadNoteIntoEditor(found[0].id);
+        m_editorTabs->setCurrentIndex(0); // switch to editor
+    } else {
+        // Create a new note with this title as a placeholder
+        qint64 id = m_repo->createNote(title,
+            QStringLiteral("# %1\n\n").arg(title));
+        m_treeModel->refresh();
+        if (id > 0) loadNoteIntoEditor(id);
+    }
+}
+
+// ============================================================================
+// Wiki link autocomplete
+// ============================================================================
+
+// ============================================================================
+// Search
+// ============================================================================
+
+void MainWindow::onSearchTextChanged(const QString &text)
+{
+    if (text.trimmed().isEmpty()) {
+        m_treeModel->setSearchFilter(QString());
+        m_folderTree->expandAll();
+        // Update count for normal mode
+        int count = m_treeModel->rowCount(m_treeModel->index(0, 0, QModelIndex()));
+        if (count > 0) {
+            auto idx = m_treeModel->index(0, 0, QModelIndex());
+            if (m_treeModel->nodeTypeForIndex(idx) == NoteTreeModel::NoteFolder) {
+                m_noteCountLabel->setText(QStringLiteral("  %1 篇笔记").arg(m_treeModel->rowCount(idx)));
+            }
+        }
+    } else {
+        m_treeModel->setSearchFilter(text);
+        m_folderTree->expandAll();
+        m_noteCountLabel->setText(QStringLiteral("  搜索中..."));
+    }
+}
+
+// ============================================================================
+// Wiki link autocomplete
+// ============================================================================
+
+void MainWindow::onCursorPositionChanged()
+{
+    QTextCursor cursor = m_editor->textCursor();
+    int pos = cursor.position();
+
+    // Get the text from start of current block to cursor
+    cursor.movePosition(QTextCursor::StartOfBlock, QTextCursor::KeepAnchor);
+    QString textBeforeCursor = cursor.selectedText();
+
+    // Look for the last [[ that hasn't been closed with ]]
+    int lastOpen = textBeforeCursor.lastIndexOf(QStringLiteral("[["));
+    if (lastOpen < 0) {
+        m_wikiCompleter->hide();
+        return;
+    }
+
+    // Check there's no closing ]] between [[ and cursor
+    QString afterOpen = textBeforeCursor.mid(lastOpen + 2);
+    if (afterOpen.contains(QStringLiteral("]]"))) {
+        m_wikiCompleter->hide();
+        return;
+    }
+
+    // Get the partial text after [[
+    QString partial = afterOpen;
+
+    // Show autocomplete
+    m_wikiCompleter->updateSuggestions(partial);
+
+    if (m_wikiCompleter->isVisible()) {
+        // Position below cursor
+        QRect cr = m_editor->cursorRect();
+        QPoint globalPos = m_editor->mapToGlobal(cr.bottomLeft());
+        m_wikiCompleter->showAt(globalPos);
+    }
+}
+
+void MainWindow::onWikiLinkSelected(const QString &title)
+{
+    QTextCursor cursor = m_editor->textCursor();
+    int cursorPos = cursor.position();
+
+    // Find the text from start of block to cursor
+    cursor.movePosition(QTextCursor::StartOfBlock, QTextCursor::KeepAnchor);
+    QString textBefore = cursor.selectedText();
+    int lastOpen = textBefore.lastIndexOf(QStringLiteral("[["));
+
+    if (lastOpen < 0) return;
+
+    // Compute absolute position of the opening [[
+    int blockStart = cursorPos - textBefore.length();
+    int openPos = blockStart + lastOpen;
+
+    // Select from [[ to current cursor position and replace
+    QTextCursor replaceCursor(m_editor->document());
+    replaceCursor.setPosition(openPos);
+    replaceCursor.setPosition(cursorPos, QTextCursor::KeepAnchor);
+    replaceCursor.insertText(QStringLiteral("[[%1]]").arg(title));
+
+    m_editor->setTextCursor(replaceCursor);
+    m_editor->setFocus();
 }
 
 // ============================================================================
@@ -109,34 +300,38 @@ void MainWindow::onTreeClicked(const QModelIndex &index)
 
 void MainWindow::setupShortcuts()
 {
-    // Bold: Ctrl+B
+    // Ctrl+B → Bold
     auto *boldShortcut = new QShortcut(QKeySequence(QStringLiteral("Ctrl+B")), m_editor);
     connect(boldShortcut, &QShortcut::activated, this, [this] {
         toggleFormatting(QStringLiteral("**"));
     });
 
-    // Italic: Ctrl+I
+    // Ctrl+I → Italic
     auto *italicShortcut = new QShortcut(QKeySequence(QStringLiteral("Ctrl+I")), m_editor);
     connect(italicShortcut, &QShortcut::activated, this, [this] {
         toggleFormatting(QStringLiteral("*"));
     });
 
-    // Strikethrough
+    // Ctrl+Shift+S → Strikethrough
     auto *strikeShortcut = new QShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+S")), m_editor);
     connect(strikeShortcut, &QShortcut::activated, this, [this] {
         toggleFormatting(QStringLiteral("~~"));
     });
 
-    // Inline code
+    // Ctrl+K → Inline code
     auto *codeShortcut = new QShortcut(QKeySequence(QStringLiteral("Ctrl+K")), m_editor);
     connect(codeShortcut, &QShortcut::activated, this, [this] {
         toggleFormatting(QStringLiteral("`"));
     });
 
-    // Tab → 4 spaces
+    // Tab → 4 spaces  (but allow completer to handle it)
     auto *tabShortcut = new QShortcut(QKeySequence(QStringLiteral("Tab")), m_editor);
     connect(tabShortcut, &QShortcut::activated, this, [this] {
-        m_editor->insertPlainText(QStringLiteral("    "));
+        if (m_wikiCompleter->isVisible()) {
+            m_wikiCompleter->selectNext();
+        } else {
+            m_editor->insertPlainText(QStringLiteral("    "));
+        }
     });
 
     // Shift+Tab → outdent
@@ -157,16 +352,13 @@ void MainWindow::setupShortcuts()
         insertFormatting(QStringLiteral("["), QStringLiteral("](url)"));
     });
 
-    // Ctrl+S → save current note
+    // Ctrl+S → save
     auto *saveShortcut = new QShortcut(QKeySequence::Save, this);
     connect(saveShortcut, &QShortcut::activated, this, [this] {
-        if (m_currentNoteId > 0) {
-            m_repo->updateNote(m_currentNoteId,
-                m_editor->document()->toPlainText().section('\n', 0, 0).trimmed(),
-                m_editor->toPlainText());
-            m_treeModel->refresh();
-            statusBar()->showMessage(tr("已保存"), 2000);
-        }
+        m_searchBox->clear();
+        m_treeModel->setSearchFilter(QString());
+        saveCurrentNote();
+        statusBar()->showMessage(tr("已保存"), 2000);
     });
 
     // Ctrl+Shift+P → toggle preview
@@ -221,11 +413,12 @@ void MainWindow::toggleFormatting(const QString &marker)
 }
 
 // ============================================================================
-// Preview
+// Preview (with [[wiki link]] support)
 // ============================================================================
 
 void MainWindow::onEditorTextChanged()
 {
+    if (m_saving) return;
     if (!m_previewDirty) {
         m_previewDirty = true;
         QTimer::singleShot(300, this, &MainWindow::updatePreview);
@@ -237,6 +430,28 @@ void MainWindow::updatePreview()
     m_previewDirty = false;
 
     QString markdown = m_editor->toPlainText();
+
+    // Convert [[wiki links]] to Markdown links for preview rendering
+    // [[Title]] → [Title](wiki://Title)
+    // [[Title|Alias]] → [Alias](wiki://Title)
+    static QRegularExpression wikiRegex(QStringLiteral("\\[\\[([^\\]\\|]+)(?:\\|([^\\]]+))?\\]\\]"));
+    QString result;
+    int lastEnd = 0;
+    QRegularExpressionMatchIterator wit = wikiRegex.globalMatch(markdown);
+    while (wit.hasNext()) {
+        QRegularExpressionMatch m = wit.next();
+        QString title = m.captured(1).trimmed();
+        QString alias = m.captured(2).trimmed();
+        if (alias.isEmpty()) alias = title;
+        // Copy text before the match
+        result += markdown.mid(lastEnd, m.capturedStart() - lastEnd);
+        // Add converted link
+        result += QStringLiteral("[%1](wiki://%2)").arg(alias, title);
+        lastEnd = m.capturedEnd();
+    }
+    result += markdown.mid(lastEnd);
+    markdown = result;
+
     QTextDocument doc;
     doc.setMarkdown(markdown);
 
@@ -252,7 +467,8 @@ void MainWindow::updatePreview()
         "pre { background: #181825; padding: 16px; border-radius: 8px; border: 1px solid #313244; }"
         "pre code { background: transparent; padding: 0; }"
         "blockquote { border-left: 3px solid #cba6f7; padding-left: 16px; color: #a6adc8; margin: 8px 0; }"
-        "a { color: #89b4fa; }"
+        "a { color: #89b4fa; text-decoration: none; }"
+        "a[href^='wiki://'] { color: #a6e3a1; border-bottom: 1px dashed #a6e3a1; }"
         "table { border-collapse: collapse; width: 100%; }"
         "th, td { border: 1px solid #45475a; padding: 8px 12px; text-align: left; }"
         "th { background: #313244; }"
@@ -285,81 +501,64 @@ void MainWindow::setupToolBar()
         "border-radius: 8px; padding: 5px 12px; font-size: 13px; min-width: 200px; }"
         "QLineEdit:focus { border-color: #cba6f7; }"));
 
-    // New Note
     QAction *newNoteBtn = m_toolBar->addAction(
         QIcon(QStringLiteral(":/icons/new_note.svg")), tr("新建"));
     newNoteBtn->setToolTip(tr("新建笔记 (Ctrl+N)"));
     connect(newNoteBtn, &QAction::triggered, this, [this] {
-        // Save current
-        if (m_currentNoteId > 0) {
-            m_repo->updateNote(m_currentNoteId,
-                m_editor->document()->toPlainText().section('\n', 0, 0).trimmed(),
-                m_editor->toPlainText());
-        }
-        qint64 id = m_repo->createNote(QStringLiteral("未命名"), QString());
+        saveCurrentNote();
+        m_treeModel->setSearchFilter(QString());
+        m_searchBox->clear();
+        qint64 id = m_repo->createNote(QStringLiteral("未命名"), QStringLiteral(""));
         m_treeModel->refresh();
         if (id > 0) loadNoteIntoEditor(id);
     });
 
     m_toolBar->addSeparator();
 
-    // Bold
     QAction *boldBtn = m_toolBar->addAction(QIcon(), QStringLiteral("B"));
-    boldBtn->setToolTip(tr("加粗 (Ctrl+B)"));
     QFont boldFont; boldFont.setBold(true); boldBtn->setFont(boldFont);
     connect(boldBtn, &QAction::triggered, this, [this] { toggleFormatting(QStringLiteral("**")); });
 
-    // Italic
     QAction *italicBtn = m_toolBar->addAction(QIcon(), QStringLiteral("I"));
-    italicBtn->setToolTip(tr("斜体 (Ctrl+I)"));
     QFont italicFont; italicFont.setItalic(true); italicBtn->setFont(italicFont);
     connect(italicBtn, &QAction::triggered, this, [this] { toggleFormatting(QStringLiteral("*")); });
 
-    // Strikethrough
     QAction *strikeBtn = m_toolBar->addAction(QIcon(), QStringLiteral("S"));
-    strikeBtn->setToolTip(tr("删除线 (Ctrl+Shift+S)"));
     QFont strikeFont; strikeFont.setStrikeOut(true); strikeBtn->setFont(strikeFont);
     connect(strikeBtn, &QAction::triggered, this, [this] { toggleFormatting(QStringLiteral("~~")); });
 
-    // Inline code
     QAction *codeBtn = m_toolBar->addAction(QIcon(), QStringLiteral("<>"));
-    codeBtn->setToolTip(tr("行内代码 (Ctrl+K)"));
     connect(codeBtn, &QAction::triggered, this, [this] { toggleFormatting(QStringLiteral("`")); });
 
     m_toolBar->addSeparator();
 
-    // Link
     QAction *linkBtn = m_toolBar->addAction(
         QIcon(QStringLiteral(":/icons/link.svg")), tr("链接"));
-    linkBtn->setToolTip(tr("插入链接 (Ctrl+L)"));
     connect(linkBtn, &QAction::triggered, this, [this] {
         insertFormatting(QStringLiteral("["), QStringLiteral("](url)"));
     });
 
-    // Search box
     m_searchBox = new QLineEdit;
     m_searchBox->setPlaceholderText(tr("搜索笔记..."));
     m_searchBox->setClearButtonEnabled(true);
     m_searchBox->setMaximumWidth(240);
     m_toolBar->addWidget(m_searchBox);
+    connect(m_searchBox, &QLineEdit::textChanged, this, &MainWindow::onSearchTextChanged);
 
     QAction *searchBtn = m_toolBar->addAction(
         QIcon(QStringLiteral(":/icons/search.svg")), tr("搜索"));
     connect(searchBtn, &QAction::triggered, this, [this] {
-        m_searchBox->setFocus();
-        m_searchBox->selectAll();
+        m_searchBox->setFocus(); m_searchBox->selectAll();
     });
 
     m_toolBar->addSeparator();
 
-    // Sidebar toggle
     m_toggleSidebarAction = m_toolBar->addAction(
         QIcon(QStringLiteral(":/icons/folder.svg")), tr("侧栏"));
     m_toggleSidebarAction->setCheckable(true);
     m_toggleSidebarAction->setChecked(true);
     connect(m_toggleSidebarAction, &QAction::triggered, this, [this] {
         m_folderTree->parentWidget()->setVisible(!m_folderTree->parentWidget()->isVisible());
-        m_toggleSidebarAction->setChecked(m_folderTree->parentWidget()->isVisible());
     });
 
     QAction *toggleRightBtn = m_toolBar->addAction(
@@ -387,13 +586,11 @@ void MainWindow::setupUi()
     leftLayout->setContentsMargins(0, 0, 0, 0);
     leftLayout->setSpacing(0);
 
-    // Header
     auto *headerLabel = new QLabel(tr("  笔记"));
     headerLabel->setStyleSheet(QStringLiteral(
         "QLabel { color: #6c7086; font-size: 10px; font-weight: 700; "
         "letter-spacing: 1px; padding: 12px 12px 6px 12px; background: transparent; }"));
 
-    // Tree view — now powered by NoteTreeModel
     m_treeModel = new NoteTreeModel(m_repo, this);
     m_folderTree = new QTreeView;
     m_folderTree->setModel(m_treeModel);
@@ -403,24 +600,100 @@ void MainWindow::setupUi()
     m_folderTree->setObjectName(QStringLiteral("folderTree"));
     m_folderTree->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_folderTree->setExpandsOnDoubleClick(false);
-    // Expand the two top-level folders by default
     m_folderTree->expand(m_treeModel->index(0, 0, QModelIndex()));
     m_folderTree->expand(m_treeModel->index(1, 0, QModelIndex()));
 
-    // Click handler
-    connect(m_folderTree, &QTreeView::clicked, this, &MainWindow::onTreeClicked);
+        connect(m_folderTree, &QTreeView::clicked, this, &MainWindow::onTreeClicked);
 
-    // Note count footer
+    // Right-click context menu for notes
+    m_folderTree->setContextMenuPolicy(Qt::CustomContextMenu);
+    connect(m_folderTree, &QTreeView::customContextMenuRequested, this, [this](const QPoint &pos) {
+        QModelIndex idx = m_folderTree->indexAt(pos);
+        qint64 noteId = m_treeModel->noteIdForIndex(idx);
+        if (noteId <= 0) return;
+
+        QMenu menu;
+        NoteData note = m_repo->getNote(noteId);
+
+        // Add tag submenu
+        QMenu *tagMenu = menu.addMenu(tr("添加标签"));
+        QVector<TagData> allTags = m_repo->listTags();
+        QVector<TagData> noteTags = m_repo->tagsForNote(noteId);
+        QSet<qint64> noteTagIds;
+        for (const auto &t : noteTags) noteTagIds.insert(t.id);
+
+        for (const TagData &tag : allTags) {
+            QAction *act = tagMenu->addAction(tag.name);
+            act->setCheckable(true);
+            act->setChecked(noteTagIds.contains(tag.id));
+            connect(act, &QAction::triggered, this, [this, noteId, tagId = tag.id] {
+                m_repo->addTagToNote(noteId, tagId);
+                m_treeModel->refresh();
+            });
+        }
+        tagMenu->addSeparator();
+        QAction *newTagAct = tagMenu->addAction(tr("+ 新建标签..."));
+        connect(newTagAct, &QAction::triggered, this, [this, noteId] {
+            bool ok;
+            QString name = QInputDialog::getText(this, tr("新建标签"), tr("标签名:"), QLineEdit::Normal, QString(), &ok);
+            if (ok && !name.trimmed().isEmpty()) {
+                qint64 tagId = m_repo->createTag(name.trimmed());
+                if (tagId > 0) {
+                    m_repo->addTagToNote(noteId, tagId);
+                    m_treeModel->refresh();
+                }
+            }
+        });
+
+        // Remove tag submenu
+        if (!noteTags.isEmpty()) {
+            QMenu *rmMenu = menu.addMenu(tr("移除标签"));
+            for (const TagData &tag : noteTags) {
+                QAction *act = rmMenu->addAction(tag.name);
+                connect(act, &QAction::triggered, this, [this, noteId, tagId = tag.id] {
+                    m_repo->removeTagFromNote(noteId, tagId);
+                    m_treeModel->refresh();
+                });
+            }
+        }
+
+        menu.addSeparator();
+
+        // Delete note
+        QAction *delAct = menu.addAction(tr("删除笔记"));
+        connect(delAct, &QAction::triggered, this, [this, noteId] {
+            auto ret = QMessageBox::question(this, tr("删除笔记"),
+                tr("确定删除「%1」吗？").arg(m_repo->getNote(noteId).title),
+                QMessageBox::Yes | QMessageBox::No);
+            if (ret == QMessageBox::Yes) {
+                m_repo->deleteNote(noteId);
+                m_treeModel->refresh();
+                if (m_currentNoteId == noteId) {
+                    m_editor->clear();
+                    m_currentNoteId = -1;
+                    refreshBacklinks();
+                }
+            }
+        });
+
+        menu.exec(m_folderTree->viewport()->mapToGlobal(pos));
+    });
+
     m_noteCountLabel = new QLabel;
     m_noteCountLabel->setStyleSheet(QStringLiteral(
         "QLabel { color: #585b70; font-size: 11px; padding: 8px 12px; "
         "background: transparent; border-top: 1px solid #313244; }"));
     auto updateCount = [this] {
-        int count = m_treeModel->rowCount(m_treeModel->index(0, 0, QModelIndex()));
-        m_noteCountLabel->setText(QStringLiteral("  %1 notes").arg(count));
+        QModelIndex root = m_treeModel->index(0, 0, QModelIndex());
+        int count = 0;
+        if (root.isValid()) {
+            NoteTreeModel::NodeType t = m_treeModel->nodeTypeForIndex(root);
+            if (t == NoteTreeModel::NoteFolder || t == NoteTreeModel::SearchFolder || t == NoteTreeModel::TagLabel)
+                count = m_treeModel->rowCount(root);
+        }
+        m_noteCountLabel->setText(QStringLiteral("  %1 篇笔记").arg(count));
     };
     updateCount();
-    // Refresh count when model refreshes
     connect(m_treeModel, &QAbstractItemModel::modelReset, this, updateCount);
 
     leftLayout->addWidget(headerLabel);
@@ -432,27 +705,40 @@ void MainWindow::setupUi()
     m_editorTabs->setObjectName(QStringLiteral("editorTabs"));
 
     m_editor = new QTextEdit;
-    m_editor->setPlaceholderText(QStringLiteral("Select a note or create a new one..."));
+    m_editor->setPlaceholderText(tr("选择一篇笔记，或新建笔记开始写作..."));
     m_editor->setTabStopDistance(32);
     m_editor->setObjectName(QStringLiteral("editor"));
     m_editor->setAcceptRichText(false);
     m_editor->setLineWrapMode(QTextEdit::WidgetWidth);
     m_editorTabs->addTab(m_editor,
         QIcon(QStringLiteral(":/icons/edit.svg")),
-        QStringLiteral(" Editor "));
+        QStringLiteral(" 编辑 "));
 
     m_highlighter = new MarkdownHighlighter(m_editor->document());
 
-    m_preview = new QTextEdit;
+    m_preview = new QTextBrowser;
     m_preview->setReadOnly(true);
-    m_preview->setPlaceholderText(QStringLiteral("Preview updates as you type..."));
+    m_preview->setOpenExternalLinks(false);
+    m_preview->setPlaceholderText(tr("实时预览将在这里显示..."));
     m_preview->setObjectName(QStringLiteral("preview"));
     m_editorTabs->addTab(m_preview,
         QIcon(QStringLiteral(":/icons/preview.svg")),
-        QStringLiteral(" Preview "));
+        QStringLiteral(" 预览 "));
 
     connect(m_editor, &QTextEdit::textChanged, this, &MainWindow::onEditorTextChanged);
+    connect(m_editor, &QTextEdit::cursorPositionChanged, this, &MainWindow::onCursorPositionChanged);
     updatePreview();
+
+    // ========== Wiki autocomplete popup ==========
+    m_wikiCompleter = new WikiCompleter(m_repo, this);
+    connect(m_wikiCompleter, &WikiCompleter::linkSelected, this, &MainWindow::onWikiLinkSelected);
+
+    // ========== Preview: click on wiki:// links to navigate ==========
+    connect(m_preview, &QTextBrowser::anchorClicked, this, [this](const QUrl &url) {
+        if (url.scheme() == QStringLiteral("wiki")) {
+            navigateToNoteByTitle(url.host() + url.path().mid(1)); // wiki://Title → Title
+        }
+    });
 
     // ========== Right: side panel ==========
     m_sidePanel = new QTabWidget;
@@ -460,23 +746,35 @@ void MainWindow::setupUi()
     m_sidePanel->setMinimumWidth(180);
     m_sidePanel->setObjectName(QStringLiteral("sidePanel"));
 
-    auto *backlinksPlaceholder = new QLabel(QStringLiteral("Backlinks\nwill appear here..."));
-    backlinksPlaceholder->setAlignment(Qt::AlignCenter);
-    backlinksPlaceholder->setWordWrap(true);
-    backlinksPlaceholder->setStyleSheet(QStringLiteral(
-        "QLabel { color: #6c7086; font-size: 13px; padding: 24px; background: transparent; }"));
-    m_sidePanel->addTab(backlinksPlaceholder,
-        QIcon(QStringLiteral(":/icons/backlinks.svg")),
-        QStringLiteral(" Backlinks "));
+    // Backlinks tab — now functional
+    m_backlinksList = new QListWidget;
+    m_backlinksList->setObjectName(QStringLiteral("backlinksList"));
+    m_backlinksList->setStyleSheet(QStringLiteral(
+        "QListWidget { background: #181825; color: #cdd6f4; border: none; "
+        "font-size: 13px; }"
+        "QListWidget::item { padding: 8px 12px; border-radius: 4px; }"
+        "QListWidget::item:hover { background: #313244; }"
+        "QListWidget::item:selected { background: #45475a; }"
+    ));
+    refreshBacklinks();
+    // Click a backlink to navigate
+    connect(m_backlinksList, &QListWidget::itemClicked, this, [this](QListWidgetItem *item) {
+        qint64 noteId = item->data(Qt::UserRole).toLongLong();
+        if (noteId > 0) loadNoteIntoEditor(noteId);
+    });
 
-    auto *outlinePlaceholder = new QLabel(QStringLiteral("Outline / TOC\nwill appear here..."));
+    m_sidePanel->addTab(m_backlinksList,
+        QIcon(QStringLiteral(":/icons/backlinks.svg")),
+        QStringLiteral(" 反向链接 "));
+
+    auto *outlinePlaceholder = new QLabel(tr("大纲 / 目录\n将在这里显示..."));
     outlinePlaceholder->setAlignment(Qt::AlignCenter);
     outlinePlaceholder->setWordWrap(true);
     outlinePlaceholder->setStyleSheet(QStringLiteral(
         "QLabel { color: #6c7086; font-size: 13px; padding: 24px; background: transparent; }"));
     m_sidePanel->addTab(outlinePlaceholder,
         QIcon(QStringLiteral(":/icons/outline.svg")),
-        QStringLiteral(" Outline "));
+        QStringLiteral(" 大纲 "));
 
     // ========== Splitter layout ==========
     m_rightSplitter = new QSplitter(Qt::Horizontal);
@@ -507,30 +805,25 @@ void MainWindow::setupMenuBar()
         QIcon(QStringLiteral(":/icons/new_note.svg")), tr("新建笔记(&N)"));
     m_newNoteAction->setShortcut(QKeySequence::New);
     connect(m_newNoteAction, &QAction::triggered, this, [this] {
-        if (m_currentNoteId > 0) {
-            m_repo->updateNote(m_currentNoteId,
-                m_editor->document()->toPlainText().section('\n', 0, 0).trimmed(),
-                m_editor->toPlainText());
-        }
-        qint64 id = m_repo->createNote(QStringLiteral("未命名"), QString());
+        saveCurrentNote();
+        m_treeModel->setSearchFilter(QString());
+        m_searchBox->clear();
+        qint64 id = m_repo->createNote(QStringLiteral("未命名"), QStringLiteral(""));
         m_treeModel->refresh();
         if (id > 0) loadNoteIntoEditor(id);
     });
 
     fileMenu->addSeparator();
-
     fileMenu->addAction(tr("退出(&X)"), QKeySequence::Quit, this, &QWidget::close);
 
     // --- Edit ---
     QMenu *editMenu = menuBar()->addMenu(tr("编辑(&E)"));
-
     m_searchAction = editMenu->addAction(
         QIcon(QStringLiteral(":/icons/search.svg")), tr("搜索(&S)..."));
     m_searchAction->setShortcut(QKeySequence::Find);
     connect(m_searchAction, &QAction::triggered, this, [this] {
         m_searchBox->setFocus(); m_searchBox->selectAll();
     });
-
     editMenu->addSeparator();
     editMenu->addAction(tr("加粗(&B)"), QKeySequence(QStringLiteral("Ctrl+B")),
         this, [this] { toggleFormatting(QStringLiteral("**")); });
@@ -549,7 +842,6 @@ void MainWindow::setupMenuBar()
         QIcon(QStringLiteral(":/icons/folder.svg")),
         tr("切换侧栏(&S)"), QKeySequence(QStringLiteral("Ctrl+\\")), this, [this] {
             m_folderTree->parentWidget()->setVisible(!m_folderTree->parentWidget()->isVisible());
-            m_toggleSidebarAction->setChecked(m_folderTree->parentWidget()->isVisible());
         });
     viewMenu->addAction(tr("切换预览(&P)"), QKeySequence(QStringLiteral("Ctrl+Shift+P")),
         this, [this] { m_editorTabs->setCurrentIndex(m_editorTabs->currentIndex() == 0 ? 1 : 0); });
@@ -561,5 +853,41 @@ void MainWindow::setupMenuBar()
 
 void MainWindow::setupStatusBar()
 {
-    statusBar()->showMessage(tr("就绪 — Ctrl+N 新建  Ctrl+S 保存  Ctrl+B 加粗  Ctrl+I 斜体"));
+    statusBar()->showMessage(tr("就绪 — Ctrl+N 新建  Ctrl+S 保存  [[ 插入链接"));
+}
+
+// ============================================================================
+// Tree click → load note
+// ============================================================================
+
+void MainWindow::onTreeClicked(const QModelIndex &index)
+{
+    if (!index.isValid()) return;
+
+    // Tag click → filter by tag
+    qint64 tagId = m_treeModel->tagIdForIndex(index);
+    if (tagId > 0) {
+        saveCurrentNote();
+        m_treeModel->setTagFilter(tagId);
+        m_folderTree->expandAll();
+        m_searchBox->clear();
+        m_noteCountLabel->setText(QStringLiteral("  按标签筛选"));
+        return;
+    }
+
+    // Note click → save current then load
+    qint64 noteId = m_treeModel->noteIdForIndex(index);
+    if (noteId > 0) {
+        saveCurrentNote();
+        loadNoteIntoEditor(noteId);
+        return;
+    }
+
+    // Folder click → restore normal
+    NoteTreeModel::NodeType type = m_treeModel->nodeTypeForIndex(index);
+    if (type == NoteTreeModel::NoteFolder || type == NoteTreeModel::SearchFolder || type == NoteTreeModel::TagLabel) {
+        saveCurrentNote();
+        m_treeModel->setSearchFilter(QString());
+        m_folderTree->expandAll();
+    }
 }

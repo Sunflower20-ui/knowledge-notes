@@ -5,13 +5,17 @@
 class QSplitter;
 class QTreeView;
 class QTextEdit;
+class QTextBrowser;
 class QTabWidget;
 class QLabel;
 class QAction;
 class QLineEdit;
 class QToolBar;
+class QListWidget;
+class QMenu;
 class MarkdownHighlighter;
 class NoteTreeModel;
+class WikiCompleter;
 class NoteRepository;
 struct NoteData;
 
@@ -26,7 +30,10 @@ public:
 private slots:
     void onEditorTextChanged();
     void updatePreview();
+    void onCursorPositionChanged();
+    void onWikiLinkSelected(const QString &title);
     void onTreeClicked(const QModelIndex &index);
+    void onSearchTextChanged(const QString &text);
 
 private:
     void setupUi();
@@ -35,9 +42,14 @@ private:
     void setupStatusBar();
     void setupShortcuts();
     void applyTheme();
-    void loadNoteIntoEditor(qint64 noteId);
+    void setupTreeContextMenu();
 
-    // Formatting helpers
+    void loadNoteIntoEditor(qint64 noteId);
+    void saveCurrentNote();
+    void syncWikiLinks(qint64 noteId, const QString &content);
+    void refreshBacklinks();
+    void navigateToNoteByTitle(const QString &title);
+
     void insertFormatting(const QString &before, const QString &after);
     void toggleFormatting(const QString &marker);
 
@@ -52,15 +64,20 @@ private:
     QTreeView *m_folderTree = nullptr;
     NoteTreeModel *m_treeModel = nullptr;
     QLabel *m_noteCountLabel = nullptr;
+    QLabel *m_searchHeader = nullptr;
 
-    // Center: editor + preview tabs
+    // Center
     QTabWidget *m_editorTabs = nullptr;
     QTextEdit *m_editor = nullptr;
-    QTextEdit *m_preview = nullptr;
+    QTextBrowser *m_preview = nullptr;
     MarkdownHighlighter *m_highlighter = nullptr;
 
-    // Right panel: backlinks / outline
+    // Wiki autocomplete
+    WikiCompleter *m_wikiCompleter = nullptr;
+
+    // Right panel
     QTabWidget *m_sidePanel = nullptr;
+    QListWidget *m_backlinksList = nullptr;
 
     QSplitter *m_mainSplitter = nullptr;
     QSplitter *m_rightSplitter = nullptr;
@@ -70,6 +87,6 @@ private:
     QAction *m_searchAction = nullptr;
     QAction *m_toggleSidebarAction = nullptr;
 
-    // Preview update throttle
     bool m_previewDirty = false;
+    bool m_saving = false;
 };

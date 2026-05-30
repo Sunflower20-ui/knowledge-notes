@@ -1,4 +1,4 @@
-﻿set(SOURCES
+set(SOURCES
     main.cpp
     app/main_window.h
     app/main_window.cpp
@@ -6,6 +6,8 @@
     app/markdown_highlighter.cpp
     app/note_tree_model.h
     app/note_tree_model.cpp
+    app/wiki_completer.h
+    app/wiki_completer.cpp
     core/database.h
     core/database.cpp
     core/note_repository.h
