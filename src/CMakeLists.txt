@@ -21,6 +21,10 @@ set(SOURCES
     core/version_repository.cpp
     app/version_history_widget.h
     app/version_history_widget.cpp
+    core/export_service.h
+    core/export_service.cpp
+    core/import_service.h
+    core/import_service.cpp
 )
 
 add_executable(knowledge_notes ${SOURCES}

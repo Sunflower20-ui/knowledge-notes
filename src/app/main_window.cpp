@@ -7,6 +7,8 @@
 #include "review_widget.h"
 #include "core/version_repository.h"
 #include "version_history_widget.h"
+#include "core/export_service.h"
+#include "core/import_service.h"
 
 #include <QSplitter>
 #include <QTreeView>
@@ -21,6 +23,7 @@
 #include <QLineEdit>
 #include <QDir>
 #include <QFile>
+#include <QFileInfo>
 #include <QIcon>
 #include <QVBoxLayout>
 #include <QWidget>
@@ -35,8 +38,10 @@
 #include <QMenu>
 #include <QInputDialog>
 #include <QMessageBox>
+#include <QFileDialog>
 #include <QScrollBar>
 #include <QDebug>
+#include <QDateTime>
 
 // ============================================================================
 // Construction
@@ -45,6 +50,8 @@
 MainWindow::MainWindow(NoteRepository *repo, FlashcardRepository *fcRepo, VersionRepository *verRepo, QWidget *parent)
     : QMainWindow(parent), m_repo(repo), m_flashcardRepo(fcRepo), m_versionRepo(verRepo)
 {
+    m_exportService = new ExportService(m_repo, this);
+    m_importService = new ImportService(m_repo, this);
     applyTheme();
     setupUi();
     setupToolBar();
@@ -930,6 +937,13 @@ void MainWindow::setupMenuBar()
         if (id > 0) loadNoteIntoEditor(id);
     });
 
+    // --- Export / Import ---
+    QMenu *exportMenu = fileMenu->addMenu(tr("\u5bfc\u51fa(&E)"));
+    exportMenu->addAction(tr("\u5bfc\u51fa\u5f53\u524d\u7b14\u8bb0..."), this, &MainWindow::onExportCurrentNote);
+    exportMenu->addAction(tr("\u5bfc\u51fa\u5168\u90e8\u7b14\u8bb0..."), this, &MainWindow::onExportAllNotes);
+    QMenu *importMenu = fileMenu->addMenu(tr("\u5bfc\u5165(&I)"));
+    importMenu->addAction(tr("\u5bfc\u5165 Markdown \u6587\u4ef6..."), this, &MainWindow::onImportMarkdownFiles);
+    importMenu->addAction(tr("\u5bfc\u5165\u6587\u4ef6\u5939..."), this, &MainWindow::onImportMarkdownDirectory);
     fileMenu->addSeparator();
     fileMenu->addAction(tr("退出(&X)"), QKeySequence::Quit, this, &QWidget::close);
 
@@ -975,6 +989,10 @@ void MainWindow::setupMenuBar()
         });
 
     // --- Help ---
+    // --- Tools ---
+    QMenu *toolsMenu = menuBar()->addMenu(tr("\u5de5\u5177(&T)"));
+    toolsMenu->addAction(tr("\u5907\u4efd\u6570\u636e\u5e93(&B)..."), this, &MainWindow::onBackupDatabase);
+    toolsMenu->addAction(tr("\u6062\u590d\u6570\u636e\u5e93(&R)..."), this, &MainWindow::onRestoreDatabase);
     QMenu *helpMenu = menuBar()->addMenu(tr("帮助(&H)"));
     helpMenu->addAction(tr("关于(&A)"), this, [] {});
 }
@@ -1100,4 +1118,135 @@ void MainWindow::createFlashcard()
             statusBar()->showMessage(tr("闪卡已创建"), 2000);
     }
     updateReviewButton();
+}
+
+
+// ============================================================================
+// Day 10: Export / Import / Backup
+// ============================================================================
+
+void MainWindow::onExportCurrentNote()
+{
+    if (m_currentNoteId <= 0) {
+        statusBar()->showMessage(tr("\u6ca1\u6709\u6253\u5f00\u7684\u7b14\u8bb0"), 3000);
+        return;
+    }
+
+    NoteData note = m_repo->getNote(m_currentNoteId);
+    QString defaultName = note.title;
+    if (defaultName.isEmpty()) defaultName = QStringLiteral("note");
+    defaultName += QStringLiteral(".md");
+
+    QString filePath = QFileDialog::getSaveFileName(this,
+        tr("\u5bfc\u51fa\u5f53\u524d\u7b14\u8bb0"),
+        defaultName,
+        tr("Markdown \u6587\u4ef6 (*.md)"));
+    if (filePath.isEmpty()) return;
+
+    QString result = m_exportService->exportNote(m_currentNoteId,
+        QFileInfo(filePath).absolutePath());
+    if (!result.isEmpty())
+        statusBar()->showMessage(tr("\u5df2\u5bfc\u51fa: %1").arg(result), 3000);
+}
+
+void MainWindow::onExportAllNotes()
+{
+    QString dirPath = QFileDialog::getExistingDirectory(this,
+        tr("\u5bfc\u51fa\u5168\u90e8\u7b14\u8bb0\u5230\u6587\u4ef6\u5939"));
+    if (dirPath.isEmpty()) return;
+
+    saveCurrentNote();
+    QStringList files = m_exportService->exportAll(dirPath);
+
+    QMessageBox::information(this,
+        tr("\u5bfc\u51fa\u5b8c\u6210"),
+        tr("\u5df2\u5bfc\u51fa %1 \u7bc7\u7b14\u8bb0\u5230:\n%2")
+            .arg(files.size()).arg(dirPath));
+    statusBar()->showMessage(tr("\u5df2\u5bfc\u51fa %1 \u7bc7\u7b14\u8bb0").arg(files.size()), 5000);
+}
+
+void MainWindow::onImportMarkdownFiles()
+{
+    QStringList filePaths = QFileDialog::getOpenFileNames(this,
+        tr("\u5bfc\u5165 Markdown \u6587\u4ef6"),
+        QString(),
+        tr("Markdown \u6587\u4ef6 (*.md)"));
+    if (filePaths.isEmpty()) return;
+
+    int count = 0;
+    for (const QString &fp : filePaths) {
+        qint64 id = m_importService->importFile(fp);
+        if (id > 0) count++;
+    }
+
+    m_treeModel->refresh();
+    QMessageBox::information(this,
+        tr("\u5bfc\u5165\u5b8c\u6210"),
+        tr("\u5df2\u5bfc\u5165 %1 / %2 \u4e2a\u6587\u4ef6").arg(count).arg(filePaths.size()));
+    statusBar()->showMessage(tr("\u5df2\u5bfc\u5165 %1 \u7bc7\u7b14\u8bb0").arg(count), 5000);
+}
+
+void MainWindow::onImportMarkdownDirectory()
+{
+    QString dirPath = QFileDialog::getExistingDirectory(this,
+        tr("\u5bfc\u5165\u6587\u4ef6\u5939\u4e2d\u7684 Markdown \u6587\u4ef6"));
+    if (dirPath.isEmpty()) return;
+
+    int count = m_importService->importDirectory(dirPath);
+    m_treeModel->refresh();
+    QMessageBox::information(this,
+        tr("\u5bfc\u5165\u5b8c\u6210"),
+        tr("\u5df2\u4ece\u6587\u4ef6\u5939\u5bfc\u5165 %1 \u7bc7\u7b14\u8bb0").arg(count));
+    statusBar()->showMessage(tr("\u5df2\u5bfc\u5165 %1 \u7bc7\u7b14\u8bb0").arg(count), 5000);
+}
+
+void MainWindow::onBackupDatabase()
+{
+    QString filePath = QFileDialog::getSaveFileName(this,
+        tr("\u5907\u4efd\u6570\u636e\u5e93"),
+        QStringLiteral("knowledge_notes_backup_%1.db")
+            .arg(QDateTime::currentDateTime().toString("yyyyMMdd_hhmmss")),
+        tr("SQLite \u6570\u636e\u5e93 (*.db)"));
+    if (filePath.isEmpty()) return;
+
+    QString dbPath = QStringLiteral(PROJECT_ROOT "/data/knowledge_notes.db");
+    if (QFile::copy(dbPath, filePath)) {
+        QMessageBox::information(this,
+            tr("\u5907\u4efd\u5b8c\u6210"),
+            tr("\u6570\u636e\u5e93\u5df2\u5907\u4efd\u5230:\n%1").arg(filePath));
+        statusBar()->showMessage(tr("\u6570\u636e\u5e93\u5df2\u5907\u4efd"), 3000);
+    } else {
+        QMessageBox::warning(this,
+            tr("\u5907\u4efd\u5931\u8d25"),
+            tr("\u65e0\u6cd5\u590d\u5236\u6570\u636e\u5e93\u6587\u4ef6"));
+    }
+}
+
+void MainWindow::onRestoreDatabase()
+{
+    auto ret = QMessageBox::warning(this,
+        tr("\u6062\u590d\u6570\u636e\u5e93"),
+        tr("\u8b66\u544a\uff1a\u6062\u590d\u5c06\u8986\u76d6\u5f53\u524d\u6240\u6709\u6570\u636e\uff01\n\n"
+           "\u8bf7\u786e\u4fdd\u5df2\u5907\u4efd\u5f53\u524d\u6570\u636e\u3002\n"
+           "\u7a0b\u5e8f\u5c06\u5728\u6062\u590d\u540e\u81ea\u52a8\u91cd\u542f\u3002"),
+        QMessageBox::Yes | QMessageBox::No);
+    if (ret != QMessageBox::Yes) return;
+
+    QString filePath = QFileDialog::getOpenFileName(this,
+        tr("\u9009\u62e9\u5907\u4efd\u6587\u4ef6"),
+        QString(),
+        tr("SQLite \u6570\u636e\u5e93 (*.db)"));
+    if (filePath.isEmpty()) return;
+
+    QString dbPath = QStringLiteral(PROJECT_ROOT "/data/knowledge_notes.db");
+    if (QFile::copy(filePath, dbPath)) {
+        QMessageBox::information(this,
+            tr("\u6062\u590d\u5b8c\u6210"),
+            tr("\u6570\u636e\u5e93\u5df2\u6062\u590d\uff0c\u7a0b\u5e8f\u5c06\u91cd\u542f\u3002"));
+        qApp->exit(773);
+    } else {
+        QMessageBox::warning(this,
+            tr("\u6062\u590d\u5931\u8d25"),
+            tr("\u65e0\u6cd5\u6062\u590d\u6570\u636e\u5e93\u6587\u4ef6"));
+    }
 }

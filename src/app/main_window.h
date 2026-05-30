@@ -21,6 +21,8 @@ class FlashcardRepository;
 class ReviewWidget;
 class VersionRepository;
 class VersionHistoryWidget;
+class ExportService;
+class ImportService;
 struct NoteData;
 
 class MainWindow : public QMainWindow
@@ -60,6 +62,14 @@ private:
     void insertFormatting(const QString &before, const QString &after);
     void toggleFormatting(const QString &marker);
 
+    // Day 10: Export / Import / Backup
+    void onExportCurrentNote();
+    void onExportAllNotes();
+    void onImportMarkdownFiles();
+    void onImportMarkdownDirectory();
+    void onBackupDatabase();
+    void onRestoreDatabase();
+
     NoteRepository *m_repo = nullptr;
     qint64 m_currentNoteId = -1;
 
@@ -91,6 +101,10 @@ private:
     VersionHistoryWidget *m_versionHistoryWidget = nullptr;
     QAction *m_reviewAction = nullptr;
 
+    // Day 10: Export / Import services
+    ExportService *m_exportService = nullptr;
+    ImportService *m_importService = nullptr;
+
     QSplitter *m_mainSplitter = nullptr;
     QSplitter *m_rightSplitter = nullptr;
 
@@ -102,4 +116,4 @@ private:
     bool m_previewDirty = false;
     bool m_editorDirty = false;
     bool m_saving = false;
-};
+};
