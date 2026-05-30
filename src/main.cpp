@@ -1,4 +1,4 @@
-﻿#include <QApplication>
+#include <QApplication>
 #include <QDir>
 #include <QDebug>
 #include "app/main_window.h"
@@ -29,19 +29,17 @@ int main(int argc, char *argv[])
     // Quick sanity: create a welcome note if the vault is empty
     if (repo.listNotes(1).isEmpty()) {
         qint64 id = repo.createNote(
-            QStringLiteral("Welcome to KnowledgeNotes"),
-            QStringLiteral("# Welcome 👋\n\n"
-                           "This is your first note. Start writing!\n\n"
-                           "- Use `[[wiki links]]` to connect notes\n"
-                           "- Tag notes to organize them\n"
-                           "- Search with `Ctrl+F`\n\n"
-                           "Happy note-taking! 🚀"));
+            QStringLiteral("欢迎使用知识笔记"),
+            QStringLiteral("# 欢迎 👋\n\n"
+                           "这是你的第一篇笔记，开始写作吧！\n\n"
+                           "- 使用 `[[wiki 链接]]` 连接笔记\n"
+                           "- 用标签整理笔记\n"
+                           "- `Ctrl+F` 搜索\n\n"
+                           "祝你笔记愉快！ 🚀"));
         qInfo() << "Created welcome note, id =" << id;
     }
 
-    MainWindow window;
-    window.setWindowTitle("KnowledgeNotes");
-    window.resize(1200, 800);
+    MainWindow window(&repo);
     window.show();
 
     return app.exec();

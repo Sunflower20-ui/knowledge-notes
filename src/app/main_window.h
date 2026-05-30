@@ -11,18 +11,22 @@ class QAction;
 class QLineEdit;
 class QToolBar;
 class MarkdownHighlighter;
+class NoteTreeModel;
+class NoteRepository;
+struct NoteData;
 
 class MainWindow : public QMainWindow
 {
     Q_OBJECT
 
 public:
-    explicit MainWindow(QWidget *parent = nullptr);
+    explicit MainWindow(NoteRepository *repo, QWidget *parent = nullptr);
     ~MainWindow() override = default;
 
 private slots:
     void onEditorTextChanged();
     void updatePreview();
+    void onTreeClicked(const QModelIndex &index);
 
 private:
     void setupUi();
@@ -31,17 +35,23 @@ private:
     void setupStatusBar();
     void setupShortcuts();
     void applyTheme();
+    void loadNoteIntoEditor(qint64 noteId);
 
     // Formatting helpers
     void insertFormatting(const QString &before, const QString &after);
     void toggleFormatting(const QString &marker);
 
+    NoteRepository *m_repo = nullptr;
+    qint64 m_currentNoteId = -1;
+
     // Toolbar
     QToolBar *m_toolBar = nullptr;
     QLineEdit *m_searchBox = nullptr;
 
-    // Left panel: folder tree + tags
+    // Left panel
     QTreeView *m_folderTree = nullptr;
+    NoteTreeModel *m_treeModel = nullptr;
+    QLabel *m_noteCountLabel = nullptr;
 
     // Center: editor + preview tabs
     QTabWidget *m_editorTabs = nullptr;

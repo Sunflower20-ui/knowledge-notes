@@ -4,6 +4,8 @@
     app/main_window.cpp
     app/markdown_highlighter.h
     app/markdown_highlighter.cpp
+    app/note_tree_model.h
+    app/note_tree_model.cpp
     core/database.h
     core/database.cpp
     core/note_repository.h

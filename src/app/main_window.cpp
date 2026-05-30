@@ -1,5 +1,7 @@
 #include "main_window.h"
 #include "markdown_highlighter.h"
+#include "note_tree_model.h"
+#include "core/note_repository.h"
 
 #include <QSplitter>
 #include <QTreeView>
@@ -10,7 +12,6 @@
 #include <QStatusBar>
 #include <QToolBar>
 #include <QLineEdit>
-#include <QFileSystemModel>
 #include <QDir>
 #include <QFile>
 #include <QIcon>
@@ -25,8 +26,12 @@
 #include <QTimer>
 #include <QDebug>
 
-MainWindow::MainWindow(QWidget *parent)
-    : QMainWindow(parent)
+// ============================================================================
+// Construction
+// ============================================================================
+
+MainWindow::MainWindow(NoteRepository *repo, QWidget *parent)
+    : QMainWindow(parent), m_repo(repo)
 {
     applyTheme();
     setupUi();
@@ -42,7 +47,7 @@ MainWindow::MainWindow(QWidget *parent)
 
 void MainWindow::applyTheme()
 {
-    setWindowTitle(QStringLiteral("KnowledgeNotes"));
+    setWindowTitle(QStringLiteral("知识笔记"));
     resize(1280, 800);
     setMinimumSize(800, 500);
 
@@ -59,6 +64,43 @@ void MainWindow::applyTheme()
     QApplication::setApplicationDisplayName(QStringLiteral("KnowledgeNotes"));
     QApplication::setOrganizationName(QStringLiteral("KnowledgeNotes"));
     QApplication::setApplicationVersion(QStringLiteral("0.1.0"));
+}
+
+// ============================================================================
+// Note loading
+// ============================================================================
+
+void MainWindow::loadNoteIntoEditor(qint64 noteId)
+{
+    if (noteId < 0) return;
+
+    // Save current note before switching
+    if (m_currentNoteId > 0) {
+        m_repo->updateNote(m_currentNoteId,
+            m_editor->document()->toPlainText().section('\n', 0, 0).trimmed(),
+            m_editor->toPlainText());
+    }
+
+    NoteData note = m_repo->getNote(noteId);
+    if (note.id != noteId) return;
+
+    m_currentNoteId = noteId;
+    m_editor->setPlainText(note.content);
+    m_previewDirty = true;
+    updatePreview();
+
+    statusBar()->showMessage(
+        QStringLiteral("笔记 #%1 — %2").arg(noteId).arg(note.title));
+}
+
+void MainWindow::onTreeClicked(const QModelIndex &index)
+{
+    if (!index.isValid()) return;
+
+    qint64 noteId = m_treeModel->noteIdForIndex(index);
+    if (noteId > 0) {
+        loadNoteIntoEditor(noteId);
+    }
 }
 
 // ============================================================================
@@ -79,25 +121,25 @@ void MainWindow::setupShortcuts()
         toggleFormatting(QStringLiteral("*"));
     });
 
-    // Strikethrough: Ctrl+Shift+S
+    // Strikethrough
     auto *strikeShortcut = new QShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+S")), m_editor);
     connect(strikeShortcut, &QShortcut::activated, this, [this] {
         toggleFormatting(QStringLiteral("~~"));
     });
 
-    // Inline code: Ctrl+K
+    // Inline code
     auto *codeShortcut = new QShortcut(QKeySequence(QStringLiteral("Ctrl+K")), m_editor);
     connect(codeShortcut, &QShortcut::activated, this, [this] {
         toggleFormatting(QStringLiteral("`"));
     });
 
-    // Tab key inserts 4 spaces instead of changing focus
+    // Tab → 4 spaces
     auto *tabShortcut = new QShortcut(QKeySequence(QStringLiteral("Tab")), m_editor);
     connect(tabShortcut, &QShortcut::activated, this, [this] {
         m_editor->insertPlainText(QStringLiteral("    "));
     });
 
-    // Shift+Tab outdents
+    // Shift+Tab → outdent
     auto *shiftTabShortcut = new QShortcut(QKeySequence(QStringLiteral("Shift+Tab")), m_editor);
     connect(shiftTabShortcut, &QShortcut::activated, this, [this] {
         QTextCursor cursor = m_editor->textCursor();
@@ -109,17 +151,28 @@ void MainWindow::setupShortcuts()
         }
     });
 
-    // Ctrl+L: insert link
+    // Ctrl+L → insert link
     auto *linkShortcut = new QShortcut(QKeySequence(QStringLiteral("Ctrl+L")), m_editor);
     connect(linkShortcut, &QShortcut::activated, this, [this] {
         insertFormatting(QStringLiteral("["), QStringLiteral("](url)"));
     });
 
-    // Ctrl+Shift+P: toggle preview tab
+    // Ctrl+S → save current note
+    auto *saveShortcut = new QShortcut(QKeySequence::Save, this);
+    connect(saveShortcut, &QShortcut::activated, this, [this] {
+        if (m_currentNoteId > 0) {
+            m_repo->updateNote(m_currentNoteId,
+                m_editor->document()->toPlainText().section('\n', 0, 0).trimmed(),
+                m_editor->toPlainText());
+            m_treeModel->refresh();
+            statusBar()->showMessage(tr("已保存"), 2000);
+        }
+    });
+
+    // Ctrl+Shift+P → toggle preview
     auto *previewShortcut = new QShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+P")), this);
     connect(previewShortcut, &QShortcut::activated, this, [this] {
-        m_editorTabs->setCurrentIndex(
-            m_editorTabs->currentIndex() == 0 ? 1 : 0);
+        m_editorTabs->setCurrentIndex(m_editorTabs->currentIndex() == 0 ? 1 : 0);
     });
 }
 
@@ -145,30 +198,24 @@ void MainWindow::toggleFormatting(const QString &marker)
 {
     QTextCursor cursor = m_editor->textCursor();
     QString selected = cursor.selectedText();
-
     int markerLen = marker.length();
 
     if (selected.isEmpty()) {
-        // No selection — wrap the word under cursor
         cursor.select(QTextCursor::WordUnderCursor);
         QString word = cursor.selectedText();
         if (!word.isEmpty()) {
             cursor.insertText(marker + word + marker);
             return;
         }
-        // No word — just insert markers
         cursor.insertText(marker + marker);
         cursor.movePosition(QTextCursor::Left, QTextCursor::MoveAnchor, markerLen);
         m_editor->setTextCursor(cursor);
         return;
     }
 
-    // Check if already wrapped with this marker
     if (selected.startsWith(marker) && selected.endsWith(marker) && selected.length() >= markerLen * 2) {
-        // Remove markers
         cursor.insertText(selected.mid(markerLen, selected.length() - markerLen * 2));
     } else {
-        // Add markers
         cursor.insertText(marker + selected + marker);
     }
 }
@@ -179,7 +226,6 @@ void MainWindow::toggleFormatting(const QString &marker)
 
 void MainWindow::onEditorTextChanged()
 {
-    // Throttle preview updates: update at most every 300ms
     if (!m_previewDirty) {
         m_previewDirty = true;
         QTimer::singleShot(300, this, &MainWindow::updatePreview);
@@ -191,11 +237,9 @@ void MainWindow::updatePreview()
     m_previewDirty = false;
 
     QString markdown = m_editor->toPlainText();
-
     QTextDocument doc;
     doc.setMarkdown(markdown);
 
-    // Set default font for the rendered HTML
     doc.setDefaultStyleSheet(QStringLiteral(
         "body { color: #cdd6f4; font-family: 'Segoe UI', 'Microsoft YaHei', sans-serif; "
         "font-size: 15px; line-height: 1.7; }"
@@ -207,8 +251,7 @@ void MainWindow::updatePreview()
         "font-family: 'Consolas', 'Cascadia Code', monospace; font-size: 13px; }"
         "pre { background: #181825; padding: 16px; border-radius: 8px; border: 1px solid #313244; }"
         "pre code { background: transparent; padding: 0; }"
-        "blockquote { border-left: 3px solid #cba6f7; padding-left: 16px; color: #a6adc8; "
-        "margin: 8px 0; }"
+        "blockquote { border-left: 3px solid #cba6f7; padding-left: 16px; color: #a6adc8; margin: 8px 0; }"
         "a { color: #89b4fa; }"
         "table { border-collapse: collapse; width: 100%; }"
         "th, td { border: 1px solid #45475a; padding: 8px 12px; text-align: left; }"
@@ -244,64 +287,64 @@ void MainWindow::setupToolBar()
 
     // New Note
     QAction *newNoteBtn = m_toolBar->addAction(
-        QIcon(QStringLiteral(":/icons/new_note.svg")), tr("New"));
-    newNoteBtn->setToolTip(tr("New note (Ctrl+N)"));
+        QIcon(QStringLiteral(":/icons/new_note.svg")), tr("新建"));
+    newNoteBtn->setToolTip(tr("新建笔记 (Ctrl+N)"));
+    connect(newNoteBtn, &QAction::triggered, this, [this] {
+        // Save current
+        if (m_currentNoteId > 0) {
+            m_repo->updateNote(m_currentNoteId,
+                m_editor->document()->toPlainText().section('\n', 0, 0).trimmed(),
+                m_editor->toPlainText());
+        }
+        qint64 id = m_repo->createNote(QStringLiteral("未命名"), QString());
+        m_treeModel->refresh();
+        if (id > 0) loadNoteIntoEditor(id);
+    });
 
     m_toolBar->addSeparator();
 
     // Bold
-    QAction *boldBtn = m_toolBar->addAction(
-        QIcon(), QStringLiteral("B"));
-    boldBtn->setToolTip(tr("Bold (Ctrl+B)"));
-    QFont boldFont = boldBtn->font();
-    boldFont.setBold(true);
-    boldBtn->setFont(boldFont);
+    QAction *boldBtn = m_toolBar->addAction(QIcon(), QStringLiteral("B"));
+    boldBtn->setToolTip(tr("加粗 (Ctrl+B)"));
+    QFont boldFont; boldFont.setBold(true); boldBtn->setFont(boldFont);
     connect(boldBtn, &QAction::triggered, this, [this] { toggleFormatting(QStringLiteral("**")); });
 
     // Italic
-    QAction *italicBtn = m_toolBar->addAction(
-        QIcon(), QStringLiteral("I"));
-    italicBtn->setToolTip(tr("Italic (Ctrl+I)"));
-    QFont italicFont = italicBtn->font();
-    italicFont.setItalic(true);
-    italicBtn->setFont(italicFont);
+    QAction *italicBtn = m_toolBar->addAction(QIcon(), QStringLiteral("I"));
+    italicBtn->setToolTip(tr("斜体 (Ctrl+I)"));
+    QFont italicFont; italicFont.setItalic(true); italicBtn->setFont(italicFont);
     connect(italicBtn, &QAction::triggered, this, [this] { toggleFormatting(QStringLiteral("*")); });
 
     // Strikethrough
-    QAction *strikeBtn = m_toolBar->addAction(
-        QIcon(), QStringLiteral("S"));
-    strikeBtn->setToolTip(tr("Strikethrough (Ctrl+Shift+S)"));
-    QFont strikeFont = strikeBtn->font();
-    strikeFont.setStrikeOut(true);
-    strikeBtn->setFont(strikeFont);
+    QAction *strikeBtn = m_toolBar->addAction(QIcon(), QStringLiteral("S"));
+    strikeBtn->setToolTip(tr("删除线 (Ctrl+Shift+S)"));
+    QFont strikeFont; strikeFont.setStrikeOut(true); strikeBtn->setFont(strikeFont);
     connect(strikeBtn, &QAction::triggered, this, [this] { toggleFormatting(QStringLiteral("~~")); });
 
     // Inline code
-    QAction *codeBtn = m_toolBar->addAction(
-        QIcon(), QStringLiteral("<>"));
-    codeBtn->setToolTip(tr("Inline code (Ctrl+K)"));
+    QAction *codeBtn = m_toolBar->addAction(QIcon(), QStringLiteral("<>"));
+    codeBtn->setToolTip(tr("行内代码 (Ctrl+K)"));
     connect(codeBtn, &QAction::triggered, this, [this] { toggleFormatting(QStringLiteral("`")); });
 
     m_toolBar->addSeparator();
 
     // Link
     QAction *linkBtn = m_toolBar->addAction(
-        QIcon(QStringLiteral(":/icons/link.svg")), tr("Link"));
-    linkBtn->setToolTip(tr("Insert link (Ctrl+L)"));
+        QIcon(QStringLiteral(":/icons/link.svg")), tr("链接"));
+    linkBtn->setToolTip(tr("插入链接 (Ctrl+L)"));
     connect(linkBtn, &QAction::triggered, this, [this] {
         insertFormatting(QStringLiteral("["), QStringLiteral("](url)"));
     });
 
     // Search box
     m_searchBox = new QLineEdit;
-    m_searchBox->setPlaceholderText(tr("Search notes..."));
+    m_searchBox->setPlaceholderText(tr("搜索笔记..."));
     m_searchBox->setClearButtonEnabled(true);
     m_searchBox->setMaximumWidth(240);
     m_toolBar->addWidget(m_searchBox);
 
     QAction *searchBtn = m_toolBar->addAction(
-        QIcon(QStringLiteral(":/icons/search.svg")), tr("Search"));
-    searchBtn->setToolTip(tr("Search (Ctrl+F)"));
+        QIcon(QStringLiteral(":/icons/search.svg")), tr("搜索"));
     connect(searchBtn, &QAction::triggered, this, [this] {
         m_searchBox->setFocus();
         m_searchBox->selectAll();
@@ -311,8 +354,7 @@ void MainWindow::setupToolBar()
 
     // Sidebar toggle
     m_toggleSidebarAction = m_toolBar->addAction(
-        QIcon(QStringLiteral(":/icons/folder.svg")), tr("Sidebar"));
-    m_toggleSidebarAction->setToolTip(tr("Toggle sidebar (Ctrl+B)"));
+        QIcon(QStringLiteral(":/icons/folder.svg")), tr("侧栏"));
     m_toggleSidebarAction->setCheckable(true);
     m_toggleSidebarAction->setChecked(true);
     connect(m_toggleSidebarAction, &QAction::triggered, this, [this] {
@@ -321,8 +363,7 @@ void MainWindow::setupToolBar()
     });
 
     QAction *toggleRightBtn = m_toolBar->addAction(
-        QIcon(QStringLiteral(":/icons/outline.svg")), tr("Outline"));
-    toggleRightBtn->setToolTip(tr("Toggle right panel"));
+        QIcon(QStringLiteral(":/icons/outline.svg")), tr("大纲"));
     toggleRightBtn->setCheckable(true);
     toggleRightBtn->setChecked(true);
     connect(toggleRightBtn, &QAction::triggered, this, [this] {
@@ -336,7 +377,7 @@ void MainWindow::setupToolBar()
 
 void MainWindow::setupUi()
 {
-    // --- Left: folder tree ---
+    // ========== Left panel: note tree ==========
     QWidget *leftPanel = new QWidget;
     leftPanel->setObjectName(QStringLiteral("leftPanel"));
     leftPanel->setStyleSheet(QStringLiteral(
@@ -346,28 +387,52 @@ void MainWindow::setupUi()
     leftLayout->setContentsMargins(0, 0, 0, 0);
     leftLayout->setSpacing(0);
 
-    auto *vaultLabel = new QLabel(tr("  VAULT"));
-    vaultLabel->setStyleSheet(QStringLiteral(
+    // Header
+    auto *headerLabel = new QLabel(tr("  笔记"));
+    headerLabel->setStyleSheet(QStringLiteral(
         "QLabel { color: #6c7086; font-size: 10px; font-weight: 700; "
         "letter-spacing: 1px; padding: 12px 12px 6px 12px; background: transparent; }"));
 
+    // Tree view — now powered by NoteTreeModel
+    m_treeModel = new NoteTreeModel(m_repo, this);
     m_folderTree = new QTreeView;
+    m_folderTree->setModel(m_treeModel);
     m_folderTree->setHeaderHidden(true);
     m_folderTree->setAnimated(true);
     m_folderTree->setIndentation(16);
     m_folderTree->setObjectName(QStringLiteral("folderTree"));
+    m_folderTree->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    m_folderTree->setExpandsOnDoubleClick(false);
+    // Expand the two top-level folders by default
+    m_folderTree->expand(m_treeModel->index(0, 0, QModelIndex()));
+    m_folderTree->expand(m_treeModel->index(1, 0, QModelIndex()));
 
-    m_folderTree->setModel(new QFileSystemModel);
+    // Click handler
+    connect(m_folderTree, &QTreeView::clicked, this, &MainWindow::onTreeClicked);
 
-    leftLayout->addWidget(vaultLabel);
+    // Note count footer
+    m_noteCountLabel = new QLabel;
+    m_noteCountLabel->setStyleSheet(QStringLiteral(
+        "QLabel { color: #585b70; font-size: 11px; padding: 8px 12px; "
+        "background: transparent; border-top: 1px solid #313244; }"));
+    auto updateCount = [this] {
+        int count = m_treeModel->rowCount(m_treeModel->index(0, 0, QModelIndex()));
+        m_noteCountLabel->setText(QStringLiteral("  %1 notes").arg(count));
+    };
+    updateCount();
+    // Refresh count when model refreshes
+    connect(m_treeModel, &QAbstractItemModel::modelReset, this, updateCount);
+
+    leftLayout->addWidget(headerLabel);
     leftLayout->addWidget(m_folderTree);
+    leftLayout->addWidget(m_noteCountLabel);
 
-    // --- Center: editor + preview tabs ---
+    // ========== Center: editor + preview ==========
     m_editorTabs = new QTabWidget;
     m_editorTabs->setObjectName(QStringLiteral("editorTabs"));
 
     m_editor = new QTextEdit;
-    m_editor->setPlaceholderText(QStringLiteral("Start writing Markdown..."));
+    m_editor->setPlaceholderText(QStringLiteral("Select a note or create a new one..."));
     m_editor->setTabStopDistance(32);
     m_editor->setObjectName(QStringLiteral("editor"));
     m_editor->setAcceptRichText(false);
@@ -376,7 +441,6 @@ void MainWindow::setupUi()
         QIcon(QStringLiteral(":/icons/edit.svg")),
         QStringLiteral(" Editor "));
 
-    // Syntax highlighter
     m_highlighter = new MarkdownHighlighter(m_editor->document());
 
     m_preview = new QTextEdit;
@@ -387,19 +451,16 @@ void MainWindow::setupUi()
         QIcon(QStringLiteral(":/icons/preview.svg")),
         QStringLiteral(" Preview "));
 
-    // Connect editor → preview
     connect(m_editor, &QTextEdit::textChanged, this, &MainWindow::onEditorTextChanged);
-
-    // Initial preview
     updatePreview();
 
-    // --- Right: side panel ---
+    // ========== Right: side panel ==========
     m_sidePanel = new QTabWidget;
     m_sidePanel->setMaximumWidth(300);
     m_sidePanel->setMinimumWidth(180);
     m_sidePanel->setObjectName(QStringLiteral("sidePanel"));
 
-    auto *backlinksPlaceholder = new QLabel(QStringLiteral("Backlinks will appear here..."));
+    auto *backlinksPlaceholder = new QLabel(QStringLiteral("Backlinks\nwill appear here..."));
     backlinksPlaceholder->setAlignment(Qt::AlignCenter);
     backlinksPlaceholder->setWordWrap(true);
     backlinksPlaceholder->setStyleSheet(QStringLiteral(
@@ -408,7 +469,7 @@ void MainWindow::setupUi()
         QIcon(QStringLiteral(":/icons/backlinks.svg")),
         QStringLiteral(" Backlinks "));
 
-    auto *outlinePlaceholder = new QLabel(QStringLiteral("Outline / TOC will appear here..."));
+    auto *outlinePlaceholder = new QLabel(QStringLiteral("Outline / TOC\nwill appear here..."));
     outlinePlaceholder->setAlignment(Qt::AlignCenter);
     outlinePlaceholder->setWordWrap(true);
     outlinePlaceholder->setStyleSheet(QStringLiteral(
@@ -417,21 +478,18 @@ void MainWindow::setupUi()
         QIcon(QStringLiteral(":/icons/outline.svg")),
         QStringLiteral(" Outline "));
 
-    // --- Splitter layout ---
+    // ========== Splitter layout ==========
     m_rightSplitter = new QSplitter(Qt::Horizontal);
     m_rightSplitter->addWidget(m_editorTabs);
     m_rightSplitter->addWidget(m_sidePanel);
     m_rightSplitter->setStretchFactor(0, 3);
     m_rightSplitter->setStretchFactor(1, 1);
-    m_rightSplitter->setObjectName(QStringLiteral("rightSplitter"));
 
     m_mainSplitter = new QSplitter(Qt::Horizontal);
     m_mainSplitter->addWidget(leftPanel);
     m_mainSplitter->addWidget(m_rightSplitter);
     m_mainSplitter->setStretchFactor(0, 0);
     m_mainSplitter->setStretchFactor(1, 1);
-    m_mainSplitter->setObjectName(QStringLiteral("mainSplitter"));
-
     m_mainSplitter->setSizes({260, 1020});
 
     setCentralWidget(m_mainSplitter);
@@ -443,71 +501,65 @@ void MainWindow::setupUi()
 
 void MainWindow::setupMenuBar()
 {
-    QMenu *fileMenu = menuBar()->addMenu(tr("&File"));
+    QMenu *fileMenu = menuBar()->addMenu(tr("文件(&F)"));
 
     m_newNoteAction = fileMenu->addAction(
-        QIcon(QStringLiteral(":/icons/new_note.svg")),
-        tr("&New Note"));
+        QIcon(QStringLiteral(":/icons/new_note.svg")), tr("新建笔记(&N)"));
     m_newNoteAction->setShortcut(QKeySequence::New);
-
-    fileMenu->addAction(
-        QIcon(QStringLiteral(":/icons/folder.svg")),
-        tr("&Open Vault..."), QKeySequence::Open, this, [] {});
+    connect(m_newNoteAction, &QAction::triggered, this, [this] {
+        if (m_currentNoteId > 0) {
+            m_repo->updateNote(m_currentNoteId,
+                m_editor->document()->toPlainText().section('\n', 0, 0).trimmed(),
+                m_editor->toPlainText());
+        }
+        qint64 id = m_repo->createNote(QStringLiteral("未命名"), QString());
+        m_treeModel->refresh();
+        if (id > 0) loadNoteIntoEditor(id);
+    });
 
     fileMenu->addSeparator();
 
-    fileMenu->addAction(tr("E&xit"), QKeySequence::Quit, this, &QWidget::close);
+    fileMenu->addAction(tr("退出(&X)"), QKeySequence::Quit, this, &QWidget::close);
 
     // --- Edit ---
-    QMenu *editMenu = menuBar()->addMenu(tr("&Edit"));
+    QMenu *editMenu = menuBar()->addMenu(tr("编辑(&E)"));
 
     m_searchAction = editMenu->addAction(
-        QIcon(QStringLiteral(":/icons/search.svg")),
-        tr("&Search..."));
+        QIcon(QStringLiteral(":/icons/search.svg")), tr("搜索(&S)..."));
     m_searchAction->setShortcut(QKeySequence::Find);
     connect(m_searchAction, &QAction::triggered, this, [this] {
-        m_searchBox->setFocus();
-        m_searchBox->selectAll();
+        m_searchBox->setFocus(); m_searchBox->selectAll();
     });
 
     editMenu->addSeparator();
-
-    editMenu->addAction(tr("&Bold"), QKeySequence(QStringLiteral("Ctrl+B")),
+    editMenu->addAction(tr("加粗(&B)"), QKeySequence(QStringLiteral("Ctrl+B")),
         this, [this] { toggleFormatting(QStringLiteral("**")); });
-    editMenu->addAction(tr("&Italic"), QKeySequence(QStringLiteral("Ctrl+I")),
+    editMenu->addAction(tr("斜体(&I)"), QKeySequence(QStringLiteral("Ctrl+I")),
         this, [this] { toggleFormatting(QStringLiteral("*")); });
-    editMenu->addAction(tr("&Strikethrough"), QKeySequence(QStringLiteral("Ctrl+Shift+S")),
+    editMenu->addAction(tr("删除线(&S)"), QKeySequence(QStringLiteral("Ctrl+Shift+S")),
         this, [this] { toggleFormatting(QStringLiteral("~~")); });
-    editMenu->addAction(tr("Inline &Code"), QKeySequence(QStringLiteral("Ctrl+K")),
+    editMenu->addAction(tr("行内代码(&C)"), QKeySequence(QStringLiteral("Ctrl+K")),
         this, [this] { toggleFormatting(QStringLiteral("`")); });
-    editMenu->addAction(tr("Insert &Link"), QKeySequence(QStringLiteral("Ctrl+L")),
+    editMenu->addAction(tr("插入链接(&L)"), QKeySequence(QStringLiteral("Ctrl+L")),
         this, [this] { insertFormatting(QStringLiteral("["), QStringLiteral("](url)")); });
 
     // --- View ---
-    QMenu *viewMenu = menuBar()->addMenu(tr("&View"));
-
+    QMenu *viewMenu = menuBar()->addMenu(tr("视图(&V)"));
     viewMenu->addAction(
         QIcon(QStringLiteral(":/icons/folder.svg")),
-        tr("Toggle &Sidebar"), QKeySequence(QStringLiteral("Ctrl+\\")), this, [this] {
+        tr("切换侧栏(&S)"), QKeySequence(QStringLiteral("Ctrl+\\")), this, [this] {
             m_folderTree->parentWidget()->setVisible(!m_folderTree->parentWidget()->isVisible());
             m_toggleSidebarAction->setChecked(m_folderTree->parentWidget()->isVisible());
         });
-
-    viewMenu->addAction(tr("Toggle &Preview"), QKeySequence(QStringLiteral("Ctrl+Shift+P")),
-        this, [this] {
-            m_editorTabs->setCurrentIndex(m_editorTabs->currentIndex() == 0 ? 1 : 0);
-        });
+    viewMenu->addAction(tr("切换预览(&P)"), QKeySequence(QStringLiteral("Ctrl+Shift+P")),
+        this, [this] { m_editorTabs->setCurrentIndex(m_editorTabs->currentIndex() == 0 ? 1 : 0); });
 
     // --- Help ---
-    QMenu *helpMenu = menuBar()->addMenu(tr("&Help"));
-    helpMenu->addAction(tr("&About"), this, [] {});
+    QMenu *helpMenu = menuBar()->addMenu(tr("帮助(&H)"));
+    helpMenu->addAction(tr("关于(&A)"), this, [] {});
 }
-
-// ============================================================================
-// Status Bar
-// ============================================================================
 
 void MainWindow::setupStatusBar()
 {
-    statusBar()->showMessage(tr("Ready — Ctrl+B Bold  Ctrl+I Italic  Ctrl+K Code  Ctrl+L Link"));
+    statusBar()->showMessage(tr("就绪 — Ctrl+N 新建  Ctrl+S 保存  Ctrl+B 加粗  Ctrl+I 斜体"));
 }
