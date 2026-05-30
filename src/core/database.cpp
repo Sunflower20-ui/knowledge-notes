@@ -224,6 +224,37 @@ bool Database::runMigrations()
         m_schemaVersion = 1;
     }
 
+        // ---- Migration v2 → v3: flashcards + spaced repetition ----
+    if (m_schemaVersion < 3) {
+        QSqlQuery q(m_db);
+
+        if (!q.exec(QStringLiteral(
+                "CREATE TABLE IF NOT EXISTS flashcards ("
+                "  id          INTEGER PRIMARY KEY AUTOINCREMENT,"
+                "  note_id     INTEGER NOT NULL REFERENCES notes(id) ON DELETE CASCADE,"
+                "  front       TEXT    NOT NULL DEFAULT '',"
+                "  back        TEXT    NOT NULL DEFAULT '',"
+                "  n           INTEGER NOT NULL DEFAULT 0,"
+                "  ef          REAL    NOT NULL DEFAULT 2.5,"
+                "  interval    INTEGER NOT NULL DEFAULT 0,"
+                "  due_date    TEXT    NOT NULL DEFAULT (date('now')),"
+                "  created_at  TEXT    NOT NULL DEFAULT (datetime('now')),"
+                "  updated_at  TEXT    NOT NULL DEFAULT (datetime('now'))"
+                ")"))) {
+            qWarning() << "Migration v3: create flashcards" << q.lastError().text();
+            return false;
+        }
+
+        q.exec(QStringLiteral(
+            "CREATE INDEX IF NOT EXISTS idx_flashcards_note ON flashcards(note_id)"));
+        q.exec(QStringLiteral(
+            "CREATE INDEX IF NOT EXISTS idx_flashcards_due ON flashcards(due_date)"));
+
+        q.exec(QStringLiteral("INSERT INTO schema_version(version) VALUES(3)"));
+        m_schemaVersion = 3;
+        qInfo() << "Migrated to schema v3: flashcards table created";
+    }
+
     qInfo() << "Database schema version:" << m_schemaVersion;
     return true;
 }

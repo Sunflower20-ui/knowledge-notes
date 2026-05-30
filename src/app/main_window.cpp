@@ -3,6 +3,8 @@
 #include "note_tree_model.h"
 #include "wiki_completer.h"
 #include "core/note_repository.h"
+#include "core/flashcard.h"
+#include "review_widget.h"
 
 #include <QSplitter>
 #include <QTreeView>
@@ -38,8 +40,8 @@
 // Construction
 // ============================================================================
 
-MainWindow::MainWindow(NoteRepository *repo, QWidget *parent)
-    : QMainWindow(parent), m_repo(repo)
+MainWindow::MainWindow(NoteRepository *repo, FlashcardRepository *fcRepo, QWidget *parent)
+    : QMainWindow(parent), m_repo(repo), m_flashcardRepo(fcRepo)
 {
     applyTheme();
     setupUi();
@@ -553,6 +555,22 @@ void MainWindow::setupToolBar()
 
     m_toolBar->addSeparator();
 
+
+    // ========== Review button (Day 8: flashcard spaced repetition) ==========
+    if (m_flashcardRepo) {
+        m_toolBar->addSeparator();
+        m_reviewAction = m_toolBar->addAction(
+            QIcon(QStringLiteral(":/icons/search.svg")), tr("复习"));
+        m_reviewAction->setToolTip(tr("闪卡复习"));
+        connect(m_reviewAction, &QAction::triggered, this, [this] {
+            if (m_reviewWidget) {
+                m_sidePanel->setVisible(true);
+                m_sidePanel->setCurrentWidget(m_reviewWidget);
+                m_reviewWidget->startSession();
+            }
+        });
+    }
+
     m_toggleSidebarAction = m_toolBar->addAction(
         QIcon(QStringLiteral(":/icons/folder.svg")), tr("侧栏"));
     m_toggleSidebarAction->setCheckable(true);
@@ -568,6 +586,7 @@ void MainWindow::setupToolBar()
     connect(toggleRightBtn, &QAction::triggered, this, [this] {
         m_sidePanel->setVisible(!m_sidePanel->isVisible());
     });
+    updateReviewButton();
 }
 
 // ============================================================================
@@ -767,6 +786,19 @@ void MainWindow::setupUi()
         QIcon(QStringLiteral(":/icons/backlinks.svg")),
         QStringLiteral(" 反向链接 "));
 
+
+    // ========== Review tab (Day 8: flashcard spaced repetition) ==========
+    if (m_flashcardRepo) {
+        m_reviewWidget = new ReviewWidget(m_flashcardRepo);
+        connect(m_reviewWidget, &ReviewWidget::finished, this, [this] {
+            updateReviewButton();
+        });
+        m_sidePanel->addTab(m_reviewWidget,
+            QIcon(QStringLiteral(":/icons/search.svg")),
+            QStringLiteral(" 复习 "));
+        updateReviewButton();
+    }
+
     auto *outlinePlaceholder = new QLabel(tr("大纲 / 目录\n将在这里显示..."));
     outlinePlaceholder->setAlignment(Qt::AlignCenter);
     outlinePlaceholder->setWordWrap(true);
@@ -846,6 +878,17 @@ void MainWindow::setupMenuBar()
     viewMenu->addAction(tr("切换预览(&P)"), QKeySequence(QStringLiteral("Ctrl+Shift+P")),
         this, [this] { m_editorTabs->setCurrentIndex(m_editorTabs->currentIndex() == 0 ? 1 : 0); });
 
+
+    viewMenu->addSeparator();
+    viewMenu->addAction(tr("闪卡复习(&R)"), QKeySequence(QStringLiteral("Ctrl+R")),
+        this, [this] {
+            if (m_reviewWidget) {
+                m_sidePanel->setVisible(true);
+                m_sidePanel->setCurrentWidget(m_reviewWidget);
+                m_reviewWidget->startSession();
+            }
+        });
+
     // --- Help ---
     QMenu *helpMenu = menuBar()->addMenu(tr("帮助(&H)"));
     helpMenu->addAction(tr("关于(&A)"), this, [] {});
@@ -854,6 +897,31 @@ void MainWindow::setupMenuBar()
 void MainWindow::setupStatusBar()
 {
     statusBar()->showMessage(tr("就绪 — Ctrl+N 新建  Ctrl+S 保存  [[ 插入链接"));
+}
+
+
+// ============================================================================
+// Review button
+// ============================================================================
+
+void MainWindow::updateReviewButton()
+{
+    if (!m_reviewWidget || !m_sidePanel) return;
+
+    int due = m_reviewWidget->dueCount();
+    QString text = due > 0
+        ? QStringLiteral(" 复习 (%1) ").arg(due)
+        : QStringLiteral(" 复习 ");
+
+    int reviewIdx = m_sidePanel->indexOf(m_reviewWidget);
+    if (reviewIdx >= 0)
+        m_sidePanel->setTabText(reviewIdx, text);
+
+    if (m_reviewAction) {
+        m_reviewAction->setToolTip(due > 0
+            ? tr("闪卡复习 — %1 张待复习").arg(due)
+            : tr("闪卡复习 — 暂无待复习卡片"));
+    }
 }
 
 // ============================================================================

@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include <QMainWindow>
 
@@ -17,6 +17,8 @@ class MarkdownHighlighter;
 class NoteTreeModel;
 class WikiCompleter;
 class NoteRepository;
+class FlashcardRepository;
+class ReviewWidget;
 struct NoteData;
 
 class MainWindow : public QMainWindow
@@ -24,7 +26,7 @@ class MainWindow : public QMainWindow
     Q_OBJECT
 
 public:
-    explicit MainWindow(NoteRepository *repo, QWidget *parent = nullptr);
+    explicit MainWindow(NoteRepository *repo, FlashcardRepository *fcRepo = nullptr, QWidget *parent = nullptr);
     ~MainWindow() override = default;
 
 private slots:
@@ -43,6 +45,7 @@ private:
     void setupShortcuts();
     void applyTheme();
     void setupTreeContextMenu();
+    void updateReviewButton();
 
     void loadNoteIntoEditor(qint64 noteId);
     void saveCurrentNote();
@@ -74,10 +77,13 @@ private:
 
     // Wiki autocomplete
     WikiCompleter *m_wikiCompleter = nullptr;
+    FlashcardRepository *m_flashcardRepo = nullptr;
 
     // Right panel
     QTabWidget *m_sidePanel = nullptr;
     QListWidget *m_backlinksList = nullptr;
+    ReviewWidget *m_reviewWidget = nullptr;
+    QAction *m_reviewAction = nullptr;
 
     QSplitter *m_mainSplitter = nullptr;
     QSplitter *m_rightSplitter = nullptr;

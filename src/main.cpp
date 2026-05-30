@@ -4,6 +4,7 @@
 #include "app/main_window.h"
 #include "core/database.h"
 #include "core/note_repository.h"
+#include "core/flashcard.h"
 
 int main(int argc, char *argv[])
 {
@@ -39,7 +40,8 @@ int main(int argc, char *argv[])
         qInfo() << "Created welcome note, id =" << id;
     }
 
-    MainWindow window(&repo);
+    FlashcardRepository flashcardRepo(database);
+    MainWindow window(&repo, &flashcardRepo);
     window.show();
 
     return app.exec();

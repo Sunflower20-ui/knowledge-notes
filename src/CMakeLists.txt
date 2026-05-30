@@ -13,6 +13,10 @@ set(SOURCES
     core/note_repository.h
     core/note_repository.cpp
     core/search_result.h
+    core/flashcard.h
+    core/flashcard.cpp
+    app/review_widget.h
+    app/review_widget.cpp
 )
 
 add_executable(knowledge_notes ${SOURCES}
